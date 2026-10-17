@@ -19,6 +19,12 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
         return lazy.Value.WaitAsync(ct); // concurrent identical requests share one CDX download
     }
 
+    public async Task<bool> HasFreshSnapshotAsync(string prefix, string filter, CancellationToken ct = default)
+    {
+        var saved = await store.GetSearchAsync(prefix, filter, ct).ConfigureAwait(false);
+        return saved is not null && !IsExpired(saved.CachedAt);
+    }
+
     private async Task<CatalogResult> RunAsync(string key, string prefix, string filter, bool refresh)
     {
         try { return await LoadAsync(prefix, filter, refresh).ConfigureAwait(false); }
@@ -27,20 +33,16 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
 
     private async Task<CatalogResult> LoadAsync(string prefix, string filter, bool refresh)
     {
+        SearchSnapshot? saved = await store.GetSearchAsync(prefix, filter).ConfigureAwait(false);
+
+        if (!refresh && saved is not null && !IsExpired(saved.CachedAt))
+            return new CatalogResult(saved, true);
+
         var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;
         var operation = await store.CreateOrGetOperationAsync(prefix, filter, kind, DateTimeOffset.UtcNow)
             .ConfigureAwait(false);
         operation = operation with { State = OperationState.Running, UpdatedAt = DateTimeOffset.UtcNow };
         await store.UpdateOperationAsync(operation).ConfigureAwait(false);
-
-        SearchSnapshot? saved = null;
-        saved = await store.GetSearchAsync(prefix, filter).ConfigureAwait(false);
-
-        if (!refresh && saved is not null && !IsExpired(saved.CachedAt))
-        {
-            await CompleteAsync(operation, saved.Captures.Count).ConfigureAwait(false);
-            return new CatalogResult(saved, true);
-        }
 
         string json;
         try

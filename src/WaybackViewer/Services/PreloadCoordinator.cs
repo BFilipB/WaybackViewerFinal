@@ -184,6 +184,29 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
         }
     }
 
+    public void Pause(long operationId) => SetOperationState(operationId, OperationState.Paused);
+
+    public void Resume(long operationId) => SetOperationState(operationId, OperationState.Running);
+
+    public void Stop(long operationId)
+    {
+        lock (gate)
+        {
+            var job = jobs.Values.FirstOrDefault(j => j.Operation.Id == operationId);
+            if (job is null) return;
+            job.Stopping = true;
+            job.Paused = false;
+            foreach (var item in pending.Where(item => item.JobKey == job.Operation.Key).ToList())
+            {
+                if (!pendingIndex.Remove(item.Capture.Key, out var node)) continue;
+                pending.Remove(node);
+            }
+            UpdateOperationLocked(job, OperationState.Stopped);
+            resumeSignal.TrySetResult();
+            CheckIdleLocked();
+        }
+    }
+
     public async Task<IReadOnlyList<BackgroundOperation>> GetOperationsAsync(CancellationToken ct = default) =>
         await store.GetOperationsAsync(activeOnly: true, ct).ConfigureAwait(false);
 
@@ -446,6 +469,22 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
     private IEnumerable<JobState> MatchingJobsLocked(string? prefix, string? filter) =>
         jobs.Values.Where(job => prefix is null || filter is null ||
             (job.Operation.Prefix == prefix && job.Operation.Filter == filter));
+
+    private void SetOperationState(long operationId, OperationState state)
+    {
+        lock (gate)
+        {
+            var job = jobs.Values.FirstOrDefault(j => j.Operation.Id == operationId);
+            if (job is null || job.Stopping) return;
+            job.Paused = state == OperationState.Paused;
+            UpdateOperationLocked(job, state);
+            if (state == OperationState.Running)
+            {
+                resumeSignal.TrySetResult();
+                resumeSignal = NewSignal(false);
+            }
+        }
+    }
 
     private void PersistOperation(BackgroundOperation value) => _ = store.UpdateOperationAsync(value);
 

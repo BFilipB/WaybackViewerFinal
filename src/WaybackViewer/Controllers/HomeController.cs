@@ -28,7 +28,8 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         try
         {
             var result = await catalog.GetAsync(prefix, activeFilter, refresh, ct);
-            preload.Enqueue(result.Snapshot.Captures, prefix, activeFilter);
+            if (result.Snapshot.Captures.Any(c => c.Capture.IsHtml && !c.Ready))
+                preload.Enqueue(result.Snapshot.Captures, prefix, activeFilter);
             var total = result.Snapshot.Captures.Count;
             var totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
             IReadOnlyList<StoredCapture> shown = result.Snapshot.Captures;
@@ -84,15 +85,35 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         var mode = NormalizePaginationMode(pagination);
         pageSize = NormalizePageSize(pageSize);
         var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;
+        if (!refresh && await catalog.HasFreshSnapshotAsync(prefix, activeFilter))
+            return Json(new { operationId = (long?)null, cached = true, prefix, filter = activeFilter, refresh, pagination = mode, pageSize });
         var operation = await store.CreateOrGetOperationAsync(prefix, activeFilter, kind, DateTimeOffset.UtcNow);
         _ = RunSearchAsync(prefix, activeFilter, refresh);
         return Json(new { operationId = operation.Id, prefix, filter = activeFilter, refresh, pagination = mode, pageSize });
     }
 
     [HttpPost]
-    public IActionResult Pause([FromQuery] string? url = null, [FromQuery] string? filter = null)
+    public async Task<IActionResult> Pause([FromQuery] long? operationId = null, [FromQuery] string? url = null, [FromQuery] string? filter = null)
     {
+        if (operationId is not null) return await SetOperationState(operationId.Value, OperationState.Paused);
         preload.Pause(NormalizeOptionalUrl(url), UrlInput.NormalizeFilter(filter));
+        return NoContent();
+    }
+
+    private async Task<IActionResult> SetOperationState(long operationId, OperationState state)
+    {
+        var operation = await store.GetOperationAsync(operationId);
+        if (operation is null) return NotFound();
+        if (operation.Kind == OperationKind.PagePreload)
+        {
+            if (state == OperationState.Paused) preload.Pause(operationId);
+            else if (state == OperationState.Running) preload.Resume(operationId);
+            else if (state == OperationState.Stopped) preload.Stop(operationId);
+        }
+        else if (operation.IsActive)
+        {
+            await store.UpdateOperationAsync(operation with { State = state, UpdatedAt = DateTimeOffset.UtcNow });
+        }
         return NoContent();
     }
 
@@ -101,7 +122,8 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         try
         {
             var result = await catalog.GetAsync(prefix, filter, refresh).ConfigureAwait(false);
-            preload.Enqueue(result.Snapshot.Captures, prefix, filter);
+            if (result.Snapshot.Captures.Any(c => c.Capture.IsHtml && !c.Ready))
+                preload.Enqueue(result.Snapshot.Captures, prefix, filter);
         }
         catch (Exception ex)
         {
@@ -118,15 +140,17 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     }
 
     [HttpPost]
-    public IActionResult Resume([FromQuery] string? url = null, [FromQuery] string? filter = null)
+    public async Task<IActionResult> Resume([FromQuery] long? operationId = null, [FromQuery] string? url = null, [FromQuery] string? filter = null)
     {
+        if (operationId is not null) return await SetOperationState(operationId.Value, OperationState.Running);
         preload.Resume(NormalizeOptionalUrl(url), UrlInput.NormalizeFilter(filter));
         return NoContent();
     }
 
     [HttpPost]
-    public IActionResult Stop([FromQuery] string? url = null, [FromQuery] string? filter = null)
+    public async Task<IActionResult> Stop([FromQuery] long? operationId = null, [FromQuery] string? url = null, [FromQuery] string? filter = null)
     {
+        if (operationId is not null) return await SetOperationState(operationId.Value, OperationState.Stopped);
         preload.Stop(NormalizeOptionalUrl(url), UrlInput.NormalizeFilter(filter));
         return NoContent();
     }

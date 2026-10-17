@@ -545,27 +545,48 @@ else if (Model.CachedAt is not null)
       if (refresh) data.set('refresh', 'true');
       const response = await fetch('/Home/StartSearch', { method: 'POST', body: data });
       if (!response.ok) throw new Error(await response.text());
-      pendingSearch = await response.json();
-      pollOperations();
+       pendingSearch = await response.json();
+       if (pendingSearch.cached) {
+         activityImmediate.textContent = 'Capture list already loaded; using the saved list.';
+         buttons.forEach(button => button.disabled = false);
+       } else {
+         pollOperations();
+       }
     } catch (error) {
       activityImmediate.textContent = 'Search could not be started: ' + (error.message || 'unknown error');
       buttons.forEach(button => button.disabled = false);
     }
   });
 
-  async function operationCommand(name) {
+  async function operationCommand(name, operationId = null) {
     activityImmediate.textContent = name === 'Pause' ? 'Pausing downloads...' :
       name === 'Resume' ? 'Resuming downloads...' : 'Stopping downloads...';
     try {
-      const query = '?url=' + encodeURIComponent(searchBar.querySelector('[name=url]').value) +
-        '&filter=' + encodeURIComponent(searchBar.querySelector('[name=filter]').value);
+      const query = operationId
+        ? '?operationId=' + encodeURIComponent(operationId)
+        : '?url=' + encodeURIComponent(searchBar.querySelector('[name=url]').value) +
+          '&filter=' + encodeURIComponent(searchBar.querySelector('[name=filter]').value);
       await fetch('/Home/' + name + query, { method: 'POST' });
       await pollOperations();
     } catch { activityImmediate.textContent = 'Could not change background activity.'; }
   }
-  byId('pauseWork').onclick = () => operationCommand('Pause');
-  byId('resumeWork').onclick = () => operationCommand('Resume');
-  byId('stopWork').onclick = () => operationCommand('Stop');
+  function selectedOperationIds() {
+    return [...operationList.querySelectorAll('.operation-select:checked')].map(x => x.value);
+  }
+  async function commandSelected(name) {
+    const ids = selectedOperationIds();
+    if (!ids.length) { activityImmediate.textContent = 'Select one or more activities first.'; return; }
+    for (const id of ids) await operationCommand(name, id);
+  }
+  byId('pauseWork').onclick = () => commandSelected('Pause');
+  byId('resumeWork').onclick = () => commandSelected('Resume');
+  byId('stopWork').onclick = () => commandSelected('Stop');
+
+  operationList.addEventListener('click', e => {
+    const button = e.target.closest('[data-operation-command]');
+    if (!button) return;
+    operationCommand(button.dataset.operationCommand, button.dataset.operationId);
+  });
 
   async function pollOperations() {
     try {
@@ -585,7 +606,12 @@ else if (Model.CachedAt is not null)
       operationList.innerHTML = operations.length ? operations.slice(0, 12).map(o => {
         const progress = o.total ? ` - ${o.completed} / ${o.total}` : '';
         const error = o.error ? ` <span class="operation-error">${esc(o.error)}</span>` : '';
-        return `<div class="operation"><strong>${esc(o.prefix)}</strong> <span>${stateText(o.state)}${progress}</span>${error}</div>`;
+        const controls = [0, 1, 2, 3, 5].includes(o.state)
+          ? `<label><input type="checkbox" class="operation-select" value="${o.id}" aria-label="Select ${esc(o.kind)} for ${esc(o.prefix)}"></label>
+             <button type="button" data-operation-command="Pause" data-operation-id="${o.id}">Pause</button>
+             <button type="button" data-operation-command="Resume" data-operation-id="${o.id}">Resume</button>
+             <button type="button" data-operation-command="Stop" data-operation-id="${o.id}">Stop</button>` : '';
+        return `<div class="operation"><span>${controls}</span> <strong>${esc(o.kind)}: ${esc(o.prefix)}</strong> <span>${stateText(o.state)}${progress}</span>${error}</div>`;
       }).join('') : 'No background operations yet.';
       if (active.length) {
         activityImmediate.textContent = active.length + ' operation' + (active.length === 1 ? '' : 's') + ' active';
