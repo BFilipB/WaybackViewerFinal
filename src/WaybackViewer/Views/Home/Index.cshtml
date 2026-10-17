@@ -60,15 +60,15 @@ else if (Model.CachedAt is not null)
   <p id="preloadStatus" class="preload-info" role="status">@readyCount of @(Model.PaginationMode == "server" ? Model.TotalCaptures : Model.Captures.Count) captures already saved in the database.</p>
 
   <div class="bar">
-    <strong id="count">@Model.Captures.Count captures</strong>
-    <button id="playAll">&#9654; Show all captures</button>
+    <strong id="count">@(Model.PaginationMode == "server" ? $"Page {Model.Page} captures ({Model.TotalCaptures} total)" : $"{Model.Captures.Count} captures")</strong>
+    <button id="playAll">&#9654; @(Model.PaginationMode == "server" ? "Show this page" : "Show all captures")</button>
     <select id="expFmt">
       <option value="xls">Excel (.xls)</option>
       <option value="txt">txt</option>
       <option value="json">json</option>
       <option value="csv">csv</option>
     </select>
-    <button id="expAll">Export all text</button>
+    <button id="expAll">@(Model.PaginationMode == "server" ? "Export this page" : "Export all text")</button>
     <span id="expStatus"></span>
   </div>
 
@@ -77,14 +77,14 @@ else if (Model.CachedAt is not null)
   <nav class="pager" aria-label="Capture pages" id="serverPager" data-mode="@Model.PaginationMode">
     @if (Model.PaginationMode == "server")
     {
-      @if (Model.Page > 1)
+       @if (Model.Page > 1)
       {
-        <a class="btn" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@(Model.Page - 1)&amp;pageSize=@Model.PageSize">Previous</a>
+         <a class="btn" rel="prev" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@(Model.Page - 1)&amp;pageSize=@Model.PageSize">Previous</a>
       }
-      <span>Page @Model.Page of @Model.TotalPages (@Model.TotalCaptures captures)</span>
+       <span aria-current="page">Page @Model.Page of @Model.TotalPages (@Model.TotalCaptures captures)</span>
       @if (Model.Page < Model.TotalPages)
       {
-        <a class="btn" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@(Model.Page + 1)&amp;pageSize=@Model.PageSize">Next</a>
+         <a class="btn" rel="next" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@(Model.Page + 1)&amp;pageSize=@Model.PageSize">Next</a>
       }
     }
     else
