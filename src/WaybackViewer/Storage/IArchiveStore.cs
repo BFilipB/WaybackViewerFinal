@@ -20,4 +20,19 @@ public interface IArchiveStore
 
     /// Inserts or replaces pages in a single round trip. Unknown captures are created on the fly.
     Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default);
+
+    /// Returns the active operation for this search, if one exists.
+    Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind,
+        CancellationToken ct = default);
+
+    /// Creates an operation, or returns the existing active operation with the same key.
+    Task<BackgroundOperation> CreateOrGetOperationAsync(string prefix, string filter, OperationKind kind,
+        DateTimeOffset now, CancellationToken ct = default);
+
+    Task<BackgroundOperation?> GetOperationAsync(long id, CancellationToken ct = default);
+
+    Task<IReadOnlyList<BackgroundOperation>> GetOperationsAsync(bool activeOnly = false,
+        CancellationToken ct = default);
+
+    Task UpdateOperationAsync(BackgroundOperation operation, CancellationToken ct = default);
 }

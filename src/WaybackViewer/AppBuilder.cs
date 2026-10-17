@@ -36,6 +36,7 @@ public static class AppBuilder
         services.AddSingleton<PreloadCoordinator>();
         services.AddTransient<LegacyCacheImporter>();
         services.AddHostedService<StoreInitializer>();
+        services.AddHostedService(sp => sp.GetRequiredService<PreloadCoordinator>());
 
         configureServices?.Invoke(services);
 

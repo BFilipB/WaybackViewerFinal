@@ -32,6 +32,46 @@ public sealed record PageText(string? Title, string? Description, string Text, s
 
 public sealed record PreloadStatus(int Total, int Completed, int Failed, bool Running, double PerSecond = 0);
 
+public enum OperationKind
+{
+    CaptureLoad,
+    WaybackRefresh,
+    PagePreload
+}
+
+public enum OperationState
+{
+    Queued,
+    Running,
+    Paused,
+    Stopping,
+    Stopped,
+    Interrupted,
+    Completed,
+    Failed
+}
+
+public sealed record BackgroundOperation(
+    long Id,
+    string Prefix,
+    string Filter,
+    OperationKind Kind,
+    OperationState State,
+    DateTimeOffset CreatedAt,
+    DateTimeOffset UpdatedAt,
+    int Total,
+    int Completed,
+    int Failed,
+    string? Error = null)
+{
+    public string Key => $"{Kind}|{Filter}|{Prefix}";
+    public bool IsActive => State is OperationState.Queued or OperationState.Running or OperationState.Paused or OperationState.Stopping;
+}
+
+public sealed record OperationStatus(
+    IReadOnlyList<BackgroundOperation> Operations,
+    int ActiveCount);
+
 public sealed record CatalogResult(SearchSnapshot Snapshot, bool FromDatabase);
 
 public sealed record CaptureListViewModel(

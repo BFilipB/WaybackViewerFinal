@@ -43,7 +43,22 @@ public sealed class SqliteArchiveStore : IArchiveStore
             FetchedAtUtc INTEGER NOT NULL)
         """,
         "CREATE TABLE IF NOT EXISTS PageText (CaptureId INTEGER PRIMARY KEY, Body TEXT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS PageHtml (CaptureId INTEGER PRIMARY KEY, HtmlGz BLOB NOT NULL)"
+        "CREATE TABLE IF NOT EXISTS PageHtml (CaptureId INTEGER PRIMARY KEY, HtmlGz BLOB NOT NULL)",
+        """
+        CREATE TABLE IF NOT EXISTS Operations (
+            Id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            UrlPrefix   TEXT NOT NULL,
+            Filter      TEXT NOT NULL,
+            Kind        INTEGER NOT NULL,
+            State       INTEGER NOT NULL,
+            CreatedAt   INTEGER NOT NULL,
+            UpdatedAt   INTEGER NOT NULL,
+            Total       INTEGER NOT NULL,
+            Completed   INTEGER NOT NULL,
+            Failed      INTEGER NOT NULL,
+            Error       TEXT,
+            UNIQUE (UrlPrefix, Filter, Kind))
+        """
     ];
 
     private readonly string connectionString;
@@ -67,6 +82,103 @@ public sealed class SqliteArchiveStore : IArchiveStore
             using var cmd = Cmd(conn, null, sql);
             cmd.ExecuteNonQuery();
         }
+        return 0;
+    }, ct);
+
+    public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind,
+        CancellationToken ct = default) => Task.Run(() =>
+    {
+        using var conn = Open();
+        using var cmd = Cmd(conn, null, "SELECT * FROM Operations WHERE UrlPrefix = $p AND Filter = $f AND Kind = $k");
+        cmd.Parameters.AddWithValue("$p", prefix);
+        cmd.Parameters.AddWithValue("$f", filter);
+        cmd.Parameters.AddWithValue("$k", (int)kind);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        var operation = ReadOperation(reader);
+        return operation.IsActive ? operation : null;
+    }, ct);
+
+    public Task<BackgroundOperation> CreateOrGetOperationAsync(string prefix, string filter, OperationKind kind,
+        DateTimeOffset now, CancellationToken ct = default) => WriteAsync(() =>
+    {
+        using var conn = Open();
+        using var find = Cmd(conn, null, "SELECT * FROM Operations WHERE UrlPrefix = $p AND Filter = $f AND Kind = $k");
+        find.Parameters.AddWithValue("$p", prefix);
+        find.Parameters.AddWithValue("$f", filter);
+        find.Parameters.AddWithValue("$k", (int)kind);
+        using (var reader = find.ExecuteReader())
+        {
+            if (reader.Read())
+            {
+                var existing = ReadOperation(reader);
+                if (existing.IsActive) return existing;
+            }
+        }
+
+        using var cmd = Cmd(conn, null, """
+            INSERT INTO Operations (UrlPrefix, Filter, Kind, State, CreatedAt, UpdatedAt, Total, Completed, Failed, Error)
+            VALUES ($p, $f, $k, $state, $created, $updated, 0, 0, 0, NULL)
+            ON CONFLICT (UrlPrefix, Filter, Kind) DO UPDATE SET
+                State = excluded.State, CreatedAt = excluded.CreatedAt, UpdatedAt = excluded.UpdatedAt,
+                Total = 0, Completed = 0, Failed = 0, Error = NULL
+            """);
+        var stamp = now.ToUnixTimeMilliseconds();
+        cmd.Parameters.AddWithValue("$p", prefix);
+        cmd.Parameters.AddWithValue("$f", filter);
+        cmd.Parameters.AddWithValue("$k", (int)kind);
+        cmd.Parameters.AddWithValue("$state", (int)OperationState.Queued);
+        cmd.Parameters.AddWithValue("$created", stamp);
+        cmd.Parameters.AddWithValue("$updated", stamp);
+        cmd.ExecuteNonQuery();
+
+        using var result = Cmd(conn, null, "SELECT * FROM Operations WHERE UrlPrefix = $p AND Filter = $f AND Kind = $k");
+        result.Parameters.AddWithValue("$p", prefix);
+        result.Parameters.AddWithValue("$f", filter);
+        result.Parameters.AddWithValue("$k", (int)kind);
+        using var row = result.ExecuteReader();
+        row.Read();
+        return ReadOperation(row);
+    }, ct);
+
+    public Task<BackgroundOperation?> GetOperationAsync(long id, CancellationToken ct = default) => Task.Run(() =>
+    {
+        using var conn = Open();
+        using var cmd = Cmd(conn, null, "SELECT * FROM Operations WHERE Id = $id");
+        cmd.Parameters.AddWithValue("$id", id);
+        using var reader = cmd.ExecuteReader();
+        return reader.Read() ? ReadOperation(reader) : null;
+    }, ct);
+
+    public Task<IReadOnlyList<BackgroundOperation>> GetOperationsAsync(bool activeOnly = false,
+        CancellationToken ct = default) => Task.Run(() =>
+    {
+        using var conn = Open();
+        var sql = activeOnly
+            ? "SELECT * FROM Operations WHERE State IN (0, 1, 2, 3, 5) ORDER BY UpdatedAt DESC"
+            : "SELECT * FROM Operations ORDER BY UpdatedAt DESC";
+        using var cmd = Cmd(conn, null, sql);
+        using var reader = cmd.ExecuteReader();
+        var result = new List<BackgroundOperation>();
+        while (reader.Read()) result.Add(ReadOperation(reader));
+        return (IReadOnlyList<BackgroundOperation>)result;
+    }, ct);
+
+    public Task UpdateOperationAsync(BackgroundOperation operation, CancellationToken ct = default) => WriteAsync(() =>
+    {
+        using var conn = Open();
+        using var cmd = Cmd(conn, null, """
+            UPDATE Operations SET State = $state, UpdatedAt = $updated, Total = $total,
+                Completed = $completed, Failed = $failed, Error = $error WHERE Id = $id
+            """);
+        cmd.Parameters.AddWithValue("$id", operation.Id);
+        cmd.Parameters.AddWithValue("$state", (int)operation.State);
+        cmd.Parameters.AddWithValue("$updated", operation.UpdatedAt.ToUnixTimeMilliseconds());
+        cmd.Parameters.AddWithValue("$total", operation.Total);
+        cmd.Parameters.AddWithValue("$completed", operation.Completed);
+        cmd.Parameters.AddWithValue("$failed", operation.Failed);
+        cmd.Parameters.AddWithValue("$error", (object?)operation.Error ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
         return 0;
     }, ct);
 
@@ -294,4 +406,17 @@ public sealed class SqliteArchiveStore : IArchiveStore
         }
         return new SearchSnapshot(searchId, cachedAt, list);
     }
+
+    private static BackgroundOperation ReadOperation(SqliteDataReader reader) => new(
+        reader.GetInt64(0),
+        reader.GetString(1),
+        reader.GetString(2),
+        (OperationKind)reader.GetInt32(3),
+        (OperationState)reader.GetInt32(4),
+        DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(5)),
+        DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(6)),
+        reader.GetInt32(7),
+        reader.GetInt32(8),
+        reader.GetInt32(9),
+        reader.IsDBNull(10) ? null : reader.GetString(10));
 }

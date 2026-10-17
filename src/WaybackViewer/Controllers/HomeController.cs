@@ -7,7 +7,7 @@ using WaybackViewer.Storage;
 
 namespace WaybackViewer.Controllers;
 
-public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCoordinator preload) : Controller
+public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCoordinator preload, IArchiveStore store) : Controller
 {
     public async Task<IActionResult> Index(string? url, string? filter, bool refresh = false, CancellationToken ct = default)
     {
@@ -24,7 +24,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         try
         {
             var result = await catalog.GetAsync(prefix, activeFilter, refresh, ct);
-            preload.Enqueue(result.Snapshot.Captures);
+            preload.Enqueue(result.Snapshot.Captures, prefix, activeFilter);
             return View(new CaptureListViewModel(prefix, activeFilter, result.Snapshot.Captures, null,
                 result.FromDatabase, result.Snapshot.CachedAt));
         }
@@ -50,6 +50,66 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     }
 
     public IActionResult PreloadStatus() => Json(preload.GetStatus());
+
+    public async Task<IActionResult> OperationStatus(CancellationToken ct = default) =>
+        Json(await store.GetOperationsAsync(activeOnly: false, ct));
+
+    [HttpPost]
+    public async Task<IActionResult> StartSearch([FromForm] string? url, [FromForm] string? filter, [FromForm] bool refresh = false)
+    {
+        var prefix = UrlInput.NormalizePrefix(url);
+        if (prefix is null) return BadRequest("Enter a valid URL without spaces.");
+        var activeFilter = UrlInput.NormalizeFilter(filter);
+        var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;
+        var operation = await store.CreateOrGetOperationAsync(prefix, activeFilter, kind, DateTimeOffset.UtcNow);
+        _ = RunSearchAsync(prefix, activeFilter, refresh);
+        return Json(new { operationId = operation.Id, prefix, filter = activeFilter, refresh });
+    }
+
+    [HttpPost]
+    public IActionResult Pause([FromQuery] string? url = null, [FromQuery] string? filter = null)
+    {
+        preload.Pause(NormalizeOptionalUrl(url), UrlInput.NormalizeFilter(filter));
+        return NoContent();
+    }
+
+    private async Task RunSearchAsync(string prefix, string filter, bool refresh)
+    {
+        try
+        {
+            var result = await catalog.GetAsync(prefix, filter, refresh).ConfigureAwait(false);
+            preload.Enqueue(result.Snapshot.Captures, prefix, filter);
+        }
+        catch (Exception ex)
+        {
+            var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;
+            var operation = await store.FindActiveOperationAsync(prefix, filter, kind).ConfigureAwait(false);
+            if (operation is not null)
+                await store.UpdateOperationAsync(operation with
+                {
+                    State = OperationState.Failed,
+                    UpdatedAt = DateTimeOffset.UtcNow,
+                    Error = ex.Message
+                }).ConfigureAwait(false);
+        }
+    }
+
+    [HttpPost]
+    public IActionResult Resume([FromQuery] string? url = null, [FromQuery] string? filter = null)
+    {
+        preload.Resume(NormalizeOptionalUrl(url), UrlInput.NormalizeFilter(filter));
+        return NoContent();
+    }
+
+    [HttpPost]
+    public IActionResult Stop([FromQuery] string? url = null, [FromQuery] string? filter = null)
+    {
+        preload.Stop(NormalizeOptionalUrl(url), UrlInput.NormalizeFilter(filter));
+        return NoContent();
+    }
+
+    private static string? NormalizeOptionalUrl(string? url) =>
+        string.IsNullOrWhiteSpace(url) ? null : UrlInput.NormalizePrefix(url);
 
     /// Moves the given captures ("timestamp|url") to the front of the background download queue.
     [HttpPost]

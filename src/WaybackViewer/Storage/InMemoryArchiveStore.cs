@@ -8,10 +8,12 @@ public sealed class InMemoryArchiveStore : IArchiveStore
     private readonly object gate = new();
     private long nextCaptureId = 1;
     private long nextSearchId = 1;
+    private long nextOperationId = 1;
     private readonly Dictionary<string, long> captureIds = new(StringComparer.Ordinal);
     private readonly Dictionary<long, Capture> captures = new();
     private readonly Dictionary<long, StoredPage> pages = new();
     private readonly Dictionary<string, (long Id, DateTimeOffset CachedAt, List<long> CaptureIds)> searches = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, BackgroundOperation> operations = new(StringComparer.Ordinal);
     private readonly List<int> saveBatchSizes = new();
 
     /// Sizes of every SavePagesAsync call (lets tests verify batching).
@@ -74,6 +76,59 @@ public sealed class InMemoryArchiveStore : IArchiveStore
         return Task.CompletedTask;
     }
 
+    public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind,
+        CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            var key = OperationKey(prefix, filter, kind);
+            return Task.FromResult(operations.TryGetValue(key, out var operation) && operation.IsActive
+                ? operation
+                : null);
+        }
+    }
+
+    public Task<BackgroundOperation> CreateOrGetOperationAsync(string prefix, string filter, OperationKind kind,
+        DateTimeOffset now, CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            var key = OperationKey(prefix, filter, kind);
+            if (operations.TryGetValue(key, out var existing) && existing.IsActive)
+                return Task.FromResult(existing);
+
+            var operation = new BackgroundOperation(nextOperationId++, prefix, filter, kind,
+                OperationState.Queued, now, now, 0, 0, 0);
+            operations[key] = operation;
+            return Task.FromResult(operation);
+        }
+    }
+
+    public Task<BackgroundOperation?> GetOperationAsync(long id, CancellationToken ct = default)
+    {
+        lock (gate)
+            return Task.FromResult(operations.Values.FirstOrDefault(operation => operation.Id == id));
+    }
+
+    public Task<IReadOnlyList<BackgroundOperation>> GetOperationsAsync(bool activeOnly = false,
+        CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            IReadOnlyList<BackgroundOperation> result = operations.Values
+                .Where(operation => !activeOnly || operation.IsActive)
+                .OrderByDescending(operation => operation.UpdatedAt)
+                .ToArray();
+            return Task.FromResult(result);
+        }
+    }
+
+    public Task UpdateOperationAsync(BackgroundOperation operation, CancellationToken ct = default)
+    {
+        lock (gate) operations[OperationKey(operation.Prefix, operation.Filter, operation.Kind)] = operation;
+        return Task.CompletedTask;
+    }
+
     private long EnsureCapture(Capture capture)
     {
         var key = Key(capture.Timestamp, capture.Original);
@@ -96,4 +151,5 @@ public sealed class InMemoryArchiveStore : IArchiveStore
 
     private static string Key(string timestamp, string original) => timestamp + "|" + original;
     private static string SearchKey(string prefix, string filter) => filter + "|" + prefix;
+    private static string OperationKey(string prefix, string filter, OperationKind kind) => $"{kind}|{filter}|{prefix}";
 }

@@ -4,7 +4,7 @@
     var readyCount = Model.Captures.Count(c => c.Ready);
 }
 
-<form method="get" class="bar">
+<form id="searchBar" method="get" class="bar">
   <input name="url" value="@Model.Url" size="45" placeholder="example.com/blog/  (or paste a web.archive.org link)" />
   <select name="filter">
     <option value="html200" selected="@(Model.Filter == "html200")">HTML pages, status 200</option>
@@ -14,6 +14,17 @@
   <button type="submit">Load captures</button>
   <button type="submit" name="refresh" value="true">Refresh from Wayback</button>
 </form>
+
+<section id="activity" class="activity" aria-live="polite">
+  <div class="activity-head">
+    <strong>Background activity</strong>
+    <span id="activityImmediate">Ready</span>
+    <button id="pauseWork" type="button">Pause</button>
+    <button id="resumeWork" type="button">Resume</button>
+    <button id="stopWork" type="button">Stop</button>
+  </div>
+  <div id="operationList" class="operation-list">No background operations yet.</div>
+</section>
 
 @if (Model.Error is not null)
 {
@@ -438,4 +449,76 @@ else if (Model.CachedAt is not null)
   }
   const expAll = byId('expAll');
   if (expAll) expAll.onclick = exportText;
+
+  // ---------------------------------------------------------------- durable background activity
+  const operationStates = ['Queued', 'Running', 'Paused', 'Stopping', 'Stopped', 'Interrupted', 'Completed', 'Failed'];
+  const activityImmediate = byId('activityImmediate');
+  const operationList = byId('operationList');
+  const searchBar = byId('searchBar');
+  let pendingSearch = null;
+  const stateText = state => operationStates[state] || 'Unknown';
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  if (searchBar) searchBar.addEventListener('submit', async e => {
+    e.preventDefault();
+    const refresh = e.submitter && e.submitter.name === 'refresh';
+    activityImmediate.textContent = refresh ? 'Refreshing from Wayback...' : 'Loading capture list...';
+    const buttons = [...searchBar.querySelectorAll('button')];
+    buttons.forEach(button => button.disabled = true);
+    try {
+      const data = new FormData(searchBar);
+      if (refresh) data.set('refresh', 'true');
+      const response = await fetch('/Home/StartSearch', { method: 'POST', body: data });
+      if (!response.ok) throw new Error(await response.text());
+      pendingSearch = await response.json();
+      pollOperations();
+    } catch (error) {
+      activityImmediate.textContent = 'Search could not be started: ' + (error.message || 'unknown error');
+      buttons.forEach(button => button.disabled = false);
+    }
+  });
+
+  async function operationCommand(name) {
+    activityImmediate.textContent = name === 'Pause' ? 'Pausing downloads...' :
+      name === 'Resume' ? 'Resuming downloads...' : 'Stopping downloads...';
+    try {
+      const query = '?url=' + encodeURIComponent(searchBar.querySelector('[name=url]').value) +
+        '&filter=' + encodeURIComponent(searchBar.querySelector('[name=filter]').value);
+      await fetch('/Home/' + name + query, { method: 'POST' });
+      await pollOperations();
+    } catch { activityImmediate.textContent = 'Could not change background activity.'; }
+  }
+  byId('pauseWork').onclick = () => operationCommand('Pause');
+  byId('resumeWork').onclick = () => operationCommand('Resume');
+  byId('stopWork').onclick = () => operationCommand('Stop');
+
+  async function pollOperations() {
+    try {
+      const response = await fetch('/Home/OperationStatus');
+      if (!response.ok) return;
+      const operations = await response.json();
+      if (pendingSearch) {
+        const current = operations.find(o => o.id === pendingSearch.operationId);
+        if (current && [6, 7].includes(current.state)) {
+          const target = '/?url=' + encodeURIComponent(pendingSearch.prefix) + '&filter=' + encodeURIComponent(pendingSearch.filter);
+          pendingSearch = null;
+          location.href = target;
+          return;
+        }
+      }
+      const active = operations.filter(o => [0, 1, 2, 3, 5].includes(o.state));
+      operationList.innerHTML = operations.length ? operations.slice(0, 12).map(o => {
+        const progress = o.total ? ` - ${o.completed} / ${o.total}` : '';
+        const error = o.error ? ` <span class="operation-error">${esc(o.error)}</span>` : '';
+        return `<div class="operation"><strong>${esc(o.prefix)}</strong> <span>${stateText(o.state)}${progress}</span>${error}</div>`;
+      }).join('') : 'No background operations yet.';
+      if (active.length) {
+        activityImmediate.textContent = active.length + ' operation' + (active.length === 1 ? '' : 's') + ' active';
+        setTimeout(pollOperations, 1000);
+      } else if (operations.length) {
+        activityImmediate.textContent = 'Background work is idle';
+      }
+    } catch { setTimeout(pollOperations, 2000); }
+  }
+  pollOperations();
 </script>
