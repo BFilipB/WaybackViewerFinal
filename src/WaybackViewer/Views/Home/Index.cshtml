@@ -1,0 +1,441 @@
+@model CaptureListViewModel
+@{
+    ViewData["Title"] = "Wayback Viewer";
+    var readyCount = Model.Captures.Count(c => c.Ready);
+}
+
+<form method="get" class="bar">
+  <input name="url" value="@Model.Url" size="45" placeholder="example.com/blog/  (or paste a web.archive.org link)" />
+  <select name="filter">
+    <option value="html200" selected="@(Model.Filter == "html200")">HTML pages, status 200</option>
+    <option value="html" selected="@(Model.Filter == "html")">HTML pages, any status</option>
+    <option value="all" selected="@(Model.Filter == "all")">Everything (incl. images, redirects)</option>
+  </select>
+  <button type="submit">Load captures</button>
+  <button type="submit" name="refresh" value="true">Refresh from Wayback</button>
+</form>
+
+@if (Model.Error is not null)
+{
+  <p class="error">Error: @Model.Error</p>
+}
+else if (string.IsNullOrEmpty(Model.Url))
+{
+  <p class="empty-state">Enter any website address above (for example <code>example.com/blog/</code>) to list every
+  page the Wayback Machine has captured under it. Captures, pages and extracted text are saved to a local SQLite database
+  database, so the next time they load instantly.</p>
+}
+else if (Model.FromDatabase && Model.CachedAt is not null)
+{
+  <p class="cache-info">Loaded from the database: @Model.CachedAt.Value.LocalDateTime.ToString("yyyy-MM-dd HH:mm")</p>
+}
+else if (Model.CachedAt is not null)
+{
+  <p class="cache-info">Loaded from Wayback and saved to the database: @Model.CachedAt.Value.LocalDateTime.ToString("yyyy-MM-dd HH:mm")</p>
+}
+
+@if (Model.Captures.Count > 0)
+{
+  <p id="preloadStatus" class="preload-info" role="status">@readyCount of @Model.Captures.Count captures already saved in the database.</p>
+
+  <div class="bar">
+    <strong id="count">@Model.Captures.Count captures</strong>
+    <button id="playAll">&#9654; Show all captures</button>
+    <select id="expFmt">
+      <option value="xls">Excel (.xls)</option>
+      <option value="txt">txt</option>
+      <option value="json">json</option>
+      <option value="csv">csv</option>
+    </select>
+    <button id="expAll">Export all text</button>
+    <span id="expStatus"></span>
+  </div>
+}
+
+<div class="capture-list">
+@foreach (var c in Model.Captures)
+{
+  <div class="card capture-row" data-key="@c.Capture.ArchiveUrl" data-ts="@c.Capture.Timestamp" data-url="@c.Capture.Original" data-ready="@(c.Ready ? "1" : "0")" data-frame="/Home/Frame?ts=@c.Capture.Timestamp&amp;url=@Uri.EscapeDataString(c.Capture.Original)">
+    <div class="meta">
+      <div class="capture-date">@c.Capture.Date.ToString("yyyy-MM-dd HH:mm")</div>
+      <div class="url" title="@c.Capture.Original">@c.Capture.Original</div>
+      <div class="capture-details">Status @c.Capture.StatusCode &middot; @c.Capture.MimeType</div>
+      <div class="row">
+        <a class="btn" href="@c.Capture.ArchiveUrl" target="_blank" rel="noopener">Open</a>
+        <button class="view">View in slideshow</button>
+      </div>
+    </div>
+  </div>
+}
+</div>
+
+<div id="ss" class="ss" hidden tabindex="-1" aria-label="Capture slideshow">
+  <div class="ssbar">
+    <span id="ssInfo"></span>
+    <label class="jump">Jump to <input id="ssJump" type="text" inputmode="numeric" placeholder="# or timestamp" aria-label="Capture number or timestamp" /></label>
+    <button id="ssJumpBtn">Go</button>
+    <span class="sshint">&larr; &rarr; navigate &nbsp; F fast/full &nbsp; O open tab &nbsp; T text (full view) &nbsp; Esc close</span>
+    <button id="ssMode">Full page (F)</button>
+    <button id="ssClose">Close</button>
+  </div>
+  <div id="ssMain" class="ssmain">
+    <div id="ssReader" class="ssreader" hidden>
+      <h2 id="ssTitle"></h2>
+      <p id="ssDesc" class="ssdesc"></p>
+      <pre id="ssBody"></pre>
+    </div>
+    <div id="ssLoading" class="ssloading" role="status" hidden>
+      <div class="spinner"></div>
+      <span id="ssLoadingText">Loading archived capture...</span>
+    </div>
+    <div id="ssError" class="sserror" hidden role="alert"></div>
+    <div id="ssTextPanel" class="sspanel" hidden>
+      <button id="ssCopy">Copy text</button>
+      <pre id="ssText"></pre>
+    </div>
+  </div>
+  <div class="ssbar">
+    <button id="ssPrev">&larr; Prev</button>
+    <a id="ssOpen" class="btn" target="_blank" rel="noopener">Open in tab (O)</a>
+    <button id="ssTextBtn">Text (T)</button>
+    <button id="ssNext">Next &rarr;</button>
+  </div>
+</div>
+
+<script>
+  const cards = [...document.querySelectorAll('.card')];
+  const byId = id => document.getElementById(id);
+
+  document.addEventListener('click', e => {
+    if (e.target.matches('.view')) startShow(e.target.closest('.card'));
+  }, true);
+
+  // ---------------------------------------------------------------- slideshow
+  // Two views. "Fast" (default) shows title + extracted text straight from the local database: instant, nothing is
+  // loaded from archive.org. "Full" shows the archived page in a frame; that page loads all of its images, styles and
+  // scripts live from archive.org, which is slow, so only the current slide and the next one are loaded.
+  const ss = byId('ss'), ssMain = byId('ssMain'), ssLoading = byId('ssLoading');
+  const ssLoadingText = byId('ssLoadingText'), ssError = byId('ssError'), ssReader = byId('ssReader');
+  const ssModeBtn = byId('ssMode');
+  const AHEAD = 1, BEHIND = 0, SPINNER_DELAY_MS = 150, TIMEOUT_MS = 20000, TEXT_LOOKAHEAD = 8, TEXT_CACHE_MAX = 80;
+  const frames = new Map();                         // full view: slide index -> { el, loaded }
+  const seen = new Set();                           // full view: capture keys that finished loading once
+  const textPromises = new Map(), textValues = new Map();   // fast view: text cache
+  let mode = localStorage.getItem('wb-mode') === 'full' ? 'full' : 'fast';
+  let list = [], idx = 0, spinnerTimer, loadTimer, boostTimer;
+
+  const keyOf = card => card.dataset.ts + '|' + card.dataset.url;
+
+  function updateModeButton() { ssModeBtn.textContent = mode === 'fast' ? 'Full page (F)' : 'Fast text view (F)'; }
+  function setMode(m) {
+    mode = m;
+    localStorage.setItem('wb-mode', m);
+    updateModeButton();
+    if (!ss.hidden) showSlide();
+  }
+  function dropFrames() { frames.forEach(f => f.el.remove()); frames.clear(); }
+
+  function textFor(card) {
+    const key = keyOf(card);
+    let p = textPromises.get(key);
+    if (!p) {
+      p = fetchText(card)
+        .catch(e => ({ title: null, description: null, text: '', error: e.message || 'failed' }))
+        .then(t => {
+          if (t.error) textPromises.delete(key);          // allow a retry later
+          else { textValues.set(key, t); card.dataset.ready = '1'; }
+          return t;
+        });
+      textPromises.set(key, p);
+      if (textPromises.size > TEXT_CACHE_MAX) {
+        const oldest = textPromises.keys().next().value;
+        textPromises.delete(oldest); textValues.delete(oldest);
+      }
+    }
+    return p;
+  }
+
+  function renderFast(card, t) {
+    byId('ssTitle').textContent = t.title || card.dataset.url;
+    byId('ssDesc').textContent = t.description || '';
+    byId('ssBody').textContent = t.text || t.error || '(no readable text in this capture - press F for the full page)';
+    ssReader.scrollTop = 0;
+  }
+
+  function showFast(card) {
+    dropFrames();
+    ssReader.hidden = false;
+    byId('ssTextPanel').hidden = true;
+    ssLoading.hidden = true;
+    const known = textValues.get(keyOf(card));
+    if (known) {
+      renderFast(card, known);
+    } else {
+      spinnerTimer = setTimeout(() => {
+        if (list[idx] !== card || textValues.has(keyOf(card))) return;
+        ssLoadingText.textContent = 'Fetching capture ' + (idx + 1) + ' of ' + list.length + '...';
+        ssLoading.hidden = false;
+      }, SPINNER_DELAY_MS);
+      textFor(card).then(t => {
+        if (list[idx] !== card) return;
+        clearTimeout(spinnerTimer);
+        ssLoading.hidden = true;
+        renderFast(card, t);
+      });
+    }
+    for (let d = 1; d <= TEXT_LOOKAHEAD && idx + d < list.length; d++) textFor(list[idx + d]);
+  }
+
+  function frameFor(i) {
+    let f = frames.get(i);
+    if (f) return f;
+    const card = list[i];
+    const el = document.createElement('iframe');
+    el.className = 'ssframe';
+    el.setAttribute('sandbox', 'allow-scripts allow-popups');
+    el.hidden = true;
+    f = { el, loaded: false };
+    el.addEventListener('load', () => {
+      f.loaded = true;
+      seen.add(card.dataset.key);
+      card.dataset.ready = '1';
+      if (i === idx && !ss.hidden && mode === 'full') onCurrentLoaded();
+    });
+    el.src = card.dataset.frame;
+    ssMain.insertBefore(el, ssLoading);
+    frames.set(i, f);
+    return f;
+  }
+
+  function onCurrentLoaded() {
+    clearTimeout(spinnerTimer);
+    clearTimeout(loadTimer);
+    ssLoading.hidden = true;
+    ssError.hidden = true;
+    ss.focus({ preventScroll: true });
+  }
+
+  function showFull(card) {
+    ssReader.hidden = true;
+    for (const [i, f] of [...frames]) {
+      if (i < idx - BEHIND || i > idx + AHEAD) { f.el.remove(); frames.delete(i); }
+    }
+    const current = frameFor(idx);
+    frames.forEach((f, i) => { f.el.hidden = i !== idx; });
+    for (let d = 1; d <= AHEAD; d++) if (idx + d < list.length) frameFor(idx + d);
+    if (idx > 0 && BEHIND > 0) frameFor(idx - 1);
+
+    ssLoading.hidden = true;
+    if (!(current.loaded || seen.has(card.dataset.key))) {
+      spinnerTimer = setTimeout(() => {
+        if (current.loaded) return;
+        ssLoadingText.textContent = 'Loading capture ' + (idx + 1) + ' of ' + list.length + '...';
+        ssLoading.hidden = false;
+      }, SPINNER_DELAY_MS);
+      loadTimer = setTimeout(() => {
+        if (current.loaded) return;
+        ssLoading.hidden = true;
+        ssError.textContent = 'This capture is taking a long time to load. Continue with the arrows, press F for the fast text view, or open it in a new tab.';
+        ssError.hidden = false;
+      }, TIMEOUT_MS);
+    }
+    if (!byId('ssTextPanel').hidden) loadSlideText();
+  }
+
+  function showSlide() {
+    const card = list[idx];
+    byId('ssInfo').textContent = (idx + 1) + ' / ' + list.length + '  |  ' + card.dataset.url;
+    byId('ssOpen').href = card.dataset.key;
+    history.replaceState(null, '', location.pathname + location.search + '#capture=' + encodeURIComponent(card.dataset.ts));
+    clearTimeout(spinnerTimer);
+    clearTimeout(loadTimer);
+    ssError.hidden = true;
+    if (mode === 'fast') showFast(card); else showFull(card);
+    boost();
+  }
+
+  // Ask the server to download the next captures first (only matters while the background download is running).
+  function boost() {
+    clearTimeout(boostTimer);
+    boostTimer = setTimeout(() => {
+      const keys = [];
+      for (let i = idx; i < Math.min(list.length, idx + 12); i++) {
+        const c = list[i];
+        if (c.dataset.ready !== '1') keys.push(keyOf(c));
+      }
+      if (keys.length)
+        fetch('/Home/Prioritize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(keys) })
+          .catch(() => {});
+    }, 150);
+  }
+
+  function startShow(startCard = null) {
+    list = [...cards].sort((a, b) => a.dataset.ts.localeCompare(b.dataset.ts));
+    if (!list.length) { alert('No captures available.'); return; }
+    idx = startCard ? Math.max(0, list.indexOf(startCard)) : 0;
+    updateModeButton();
+    ss.hidden = false;
+    document.body.style.overflow = 'hidden';
+    showSlide();
+    ss.focus({ preventScroll: true });
+  }
+  function findCapture(value) {
+    const target = String(value || '').trim();
+    if (!target) return null;
+    if (/^\d+$/.test(target) && target.length < 14) {
+      const number = Number(target);
+      return number >= 1 && number <= list.length ? list[number - 1] : null;
+    }
+    return list.find(card => card.dataset.ts === target) || null;
+  }
+  function jumpTo(value) {
+    const card = findCapture(value);
+    if (!card) { alert('Capture not found. Enter a number from 1 to ' + list.length + ' or a full timestamp.'); return; }
+    idx = list.indexOf(card);
+    showSlide();
+    ss.focus({ preventScroll: true });
+  }
+  function closeShow() {
+    clearTimeout(spinnerTimer); clearTimeout(loadTimer);
+    dropFrames();
+    ss.hidden = true;
+    document.body.style.overflow = '';
+  }
+  function nextSlide() { if (idx < list.length - 1) { idx++; showSlide(); } else { closeShow(); alert('End of list.'); } }
+  function prevSlide() { if (idx > 0) { idx--; showSlide(); } }
+
+  const playAll = byId('playAll');
+  if (playAll) playAll.onclick = () => startShow();
+  byId('ssJumpBtn').onclick = () => jumpTo(byId('ssJump').value);
+  byId('ssJump').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); jumpTo(e.target.value); } });
+  byId('ssClose').onclick = closeShow;
+  byId('ssNext').onclick = nextSlide;
+  byId('ssPrev').onclick = prevSlide;
+  ssModeBtn.onclick = () => setMode(mode === 'fast' ? 'full' : 'fast');
+  updateModeButton();
+
+  const initialCapture = new URLSearchParams(location.hash.substring(1)).get('capture');
+  if (initialCapture && cards.length) { startShow(); jumpTo(initialCapture); }
+
+  document.addEventListener('keydown', e => {
+    if (ss.hidden) return;
+    if (e.target && e.target.id === 'ssJump') return;
+    if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); nextSlide(); }
+    else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); prevSlide(); }
+    else if (e.key === 'f' || e.key === 'F') setMode(mode === 'fast' ? 'full' : 'fast');
+    else if (e.key === 'o' || e.key === 'O') window.open(list[idx].dataset.key, '_blank', 'noopener');
+    else if ((e.key === 't' || e.key === 'T') && mode === 'full') toggleText();
+    else if (e.key === 'Escape') closeShow();
+  });
+
+  // ---------------------------------------------------------------- text panel + export
+  async function fetchText(card) {
+    const r = await fetch('/Home/Text?ts=' + card.dataset.ts + '&url=' + encodeURIComponent(card.dataset.url));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+  async function loadSlideText() {
+    const c = list[idx];
+    const box = byId('ssText');
+    box.textContent = 'Loading text...';
+    try {
+      const t = await fetchText(c);
+      if (list[idx] !== c) return; // the user already moved on
+      const txt = [t.title, t.description, '', t.text].filter(x => x !== null && x !== undefined).join('\n').trim();
+      box.textContent = txt || t.error || '(no readable text in this capture - probably a JavaScript-only page)';
+    } catch { box.textContent = '(failed to load text)'; }
+  }
+  function toggleText() {
+    const panel = byId('ssTextPanel');
+    panel.hidden = !panel.hidden;
+    if (!panel.hidden) loadSlideText();
+  }
+  byId('ssTextBtn').onclick = toggleText;
+  byId('ssCopy').onclick = () => navigator.clipboard.writeText(byId('ssText').textContent);
+
+  // ---------------------------------------------------------------- background preload progress
+  const preloadStatus = byId('preloadStatus');
+  const eta = sec => sec < 90 ? Math.round(sec) + ' s' : sec < 5400 ? Math.round(sec / 60) + ' min' : (sec / 3600).toFixed(1) + ' h';
+  async function pollPreloadStatus() {
+    if (!preloadStatus) return;
+    try {
+      const r = await fetch('/Home/PreloadStatus');
+      if (!r.ok) return;
+      const p = await r.json();
+      if (p.total) {
+        const speed = p.perSecond ? ' - ' + p.perSecond.toFixed(1) + ' pages/s' : '';
+        const left = p.running && p.perSecond ? ', about ' + eta((p.total - p.completed) / p.perSecond) + ' left' : '';
+        preloadStatus.textContent = (p.running ? 'Downloading and saving: ' : 'Saved: ') +
+          p.completed + ' / ' + p.total + (p.failed ? ' (' + p.failed + ' failed)' : '') + speed + left;
+      }
+      if (p.running) setTimeout(pollPreloadStatus, 1000);
+    } catch { setTimeout(pollPreloadStatus, 2000); }
+  }
+  pollPreloadStatus();
+
+  let exporting = false, cancelExport = false;
+  const csvCell = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
+  const htmlCell = v => String(v ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+  function buildFile(out, fmt) {
+    if (fmt === 'xls') {
+      const head = ['URL', 'Archive URL', 'Timestamp', 'Title', 'Description', 'Text', 'Error'];
+      const rows = out.map(o => [o.url, o.archive, o.ts, o.title, o.description, o.text, o.error]);
+      const table = [head, ...rows].map((row, i) =>
+        '<tr>' + row.map(value => '<' + (i === 0 ? 'th' : 'td') + '>' + htmlCell(value) + '</' + (i === 0 ? 'th' : 'td') + '>').join('') + '</tr>'
+      ).join('');
+      return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>' +
+        'th{background:#d9eaf7;font-weight:bold}td,th{border:1px solid #999;padding:4px;vertical-align:top;white-space:pre-wrap}' +
+        '</style></head><body><table>' + table + '</table></body></html>';
+    }
+    if (fmt === 'json') return JSON.stringify(out, null, 2);
+    if (fmt === 'csv') {
+      const head = ['url', 'archive_url', 'timestamp', 'title', 'description', 'text', 'error'];
+      const rows = out.map(o => [o.url, o.archive, o.ts, o.title, o.description, o.text, o.error].map(csvCell).join(','));
+      return [head.join(',')].concat(rows).join('\r\n');
+    }
+    return out.map(o =>
+      '==== ' + o.url + '\nArchive: ' + o.archive + '\nCaptured: ' + o.ts +
+      '\nTitle: ' + (o.title || '') + '\nDescription: ' + (o.description || '') + '\nError: ' + (o.error || '') + '\n\n' + (o.text || '') + '\n\n'
+    ).join('');
+  }
+
+  async function exportText() {
+    const st = byId('expStatus');
+    if (exporting) { cancelExport = true; return; }
+    const items = cards;
+    if (!items.length) { alert('No captures available.'); return; }
+    const fmt = byId('expFmt').value;
+    exporting = true; cancelExport = false;
+    const out = [];
+    let nextItem = 0;
+    async function worker() {
+      while (!cancelExport && nextItem < items.length) {
+        const i = nextItem++;
+        const c = items[i];
+        let t, error = '';
+        try { t = await fetchText(c); error = t.error || ''; }
+        catch (e) { t = { title: null, description: null, text: '' }; error = e.message || 'Text extraction failed'; }
+        out.push({ i, url: c.dataset.url, archive: c.dataset.key, ts: c.dataset.ts,
+                   title: t.title, description: t.description, text: t.text, error });
+        const failed = out.filter(o => o.error).length;
+        st.textContent = 'Exporting ' + out.length + ' / ' + items.length + (failed ? ' (' + failed + ' failed)' : '') + ' - click again to stop';
+      }
+    }
+    await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
+    out.sort((a, b) => a.i - b.i);
+    const isExcel = fmt === 'xls';
+    const blob = new Blob([buildFile(out, fmt)], { type: isExcel ? 'application/vnd.ms-excel' : 'text/plain;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'wayback-export-all.' + (isExcel ? 'xls' : fmt);
+    a.click();
+    const failedCount = out.filter(o => o.error).length;
+    st.textContent = 'Saved ' + out.length + ' pages' + (cancelExport ? ' (stopped early)' : '') +
+      (failedCount ? ' with ' + failedCount + ' errors' : '');
+    exporting = false;
+  }
+  const expAll = byId('expAll');
+  if (expAll) expAll.onclick = exportText;
+</script>

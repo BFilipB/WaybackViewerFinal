@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/WaybackViewer/WaybackViewer.csproj" />
+  <Project Path="tests/WaybackViewer.Tests/WaybackViewer.Tests.csproj" />
+</Solution>
