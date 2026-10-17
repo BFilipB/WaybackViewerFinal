@@ -87,7 +87,7 @@ public sealed record CaptureListViewModel(
     string? Error,
     bool FromDatabase = false,
     DateTimeOffset? CachedAt = null,
-    string PaginationMode = "client",
+    string PaginationMode = "server",
     int Page = 1,
     int PageSize = 50,
     int TotalCaptures = 0)

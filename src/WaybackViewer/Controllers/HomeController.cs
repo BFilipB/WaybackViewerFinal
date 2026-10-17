@@ -135,7 +135,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         string.IsNullOrWhiteSpace(url) ? null : UrlInput.NormalizePrefix(url);
 
     private static string NormalizePaginationMode(string? value) =>
-        string.Equals(value, "server", StringComparison.OrdinalIgnoreCase) ? "server" : "client";
+        string.Equals(value, "client", StringComparison.OrdinalIgnoreCase) ? "client" : "server";
 
     private static int NormalizePageSize(int value) => value switch
     {

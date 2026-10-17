@@ -12,8 +12,8 @@
     <option value="all" selected="@(Model.Filter == "all")">Everything (incl. images, redirects)</option>
   </select>
   <select name="pagination" aria-label="Pagination mode">
-    <option value="client" selected="@(Model.PaginationMode == "client")">Client pagination</option>
-    <option value="server" selected="@(Model.PaginationMode == "server")">Server pagination</option>
+    <option value="server" selected="@(Model.PaginationMode == "server")">Server pagination (recommended)</option>
+    <option value="client" selected="@(Model.PaginationMode == "client")">Client pagination (loads all)</option>
   </select>
   <select name="pageSize" aria-label="Captures per page">
     @foreach (var size in new[] { 25, 50, 100, 200 })

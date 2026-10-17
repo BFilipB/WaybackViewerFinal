@@ -19,11 +19,11 @@ public class PaginationTests
     }
 
     [Fact]
-    public void Pagination_defaults_to_client_mode()
+    public void Pagination_defaults_to_server_mode()
     {
         var model = new CaptureListViewModel("example.com", "html200", [], null);
 
-        Assert.Equal("client", model.PaginationMode);
+        Assert.Equal("server", model.PaginationMode);
         Assert.Equal(50, model.PageSize);
     }
 }
