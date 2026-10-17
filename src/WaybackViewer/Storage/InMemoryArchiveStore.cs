@@ -32,6 +32,26 @@ public sealed class InMemoryArchiveStore : IArchiveStore
         }
     }
 
+    public Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit,
+        CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            if (!searches.TryGetValue(SearchKey(prefix, filter), out var search))
+                return Task.FromResult<PagedSearchResult?>(null);
+
+            var page = search.CaptureIds
+                .Select(id => new StoredCapture(id, captures[id], pages.ContainsKey(id)))
+                .OrderByDescending(c => c.Capture.Timestamp)
+                .ThenByDescending(c => c.Id)
+                .Skip(Math.Max(0, offset))
+                .Take(Math.Max(0, limit))
+                .ToArray();
+            return Task.FromResult<PagedSearchResult?>(new PagedSearchResult(
+                search.Id, search.CachedAt, page, search.CaptureIds.Count));
+        }
+    }
+
     public Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> list,
         DateTimeOffset cachedAt, CancellationToken ct = default)
     {

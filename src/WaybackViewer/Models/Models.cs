@@ -21,6 +21,12 @@ public sealed record StoredCapture(long Id, Capture Capture, bool Ready);
 
 public sealed record SearchSnapshot(long SearchId, DateTimeOffset CachedAt, IReadOnlyList<StoredCapture> Captures);
 
+public sealed record PagedSearchResult(
+    long SearchId,
+    DateTimeOffset CachedAt,
+    IReadOnlyList<StoredCapture> Captures,
+    int TotalCount);
+
 public sealed record ParsedPage(string? Title, string? Description, string Text);
 
 /// A freshly downloaded page, ready to be saved (HTML already gzip-compressed).

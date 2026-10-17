@@ -11,6 +11,10 @@ public interface IArchiveStore
     /// The saved capture list for a search, newest capture first, or null when never saved.
     Task<SearchSnapshot?> GetSearchAsync(string prefix, string filter, CancellationToken ct = default);
 
+    /// Loads only one page of a saved search plus its total capture count.
+    Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit,
+        CancellationToken ct = default);
+
     /// Saves (or replaces) the capture list for a search and returns it. Captures and pages already stored are kept.
     Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> captures,
         DateTimeOffset cachedAt, CancellationToken ct = default);

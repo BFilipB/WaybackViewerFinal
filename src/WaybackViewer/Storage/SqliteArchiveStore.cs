@@ -85,6 +85,29 @@ public sealed class SqliteArchiveStore : IArchiveStore
         return 0;
     }, ct);
 
+    public Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit,
+        CancellationToken ct = default) => Task.Run(() =>
+        {
+            using var conn = Open();
+            long id;
+            DateTimeOffset cachedAt;
+            using (var find = Cmd(conn, null, "SELECT Id, CachedAtUtc FROM Searches WHERE UrlPrefix = $p AND Filter = $f"))
+            {
+                find.Parameters.AddWithValue("$p", prefix);
+                find.Parameters.AddWithValue("$f", filter);
+                using var reader = find.ExecuteReader();
+                if (!reader.Read()) return null;
+                id = reader.GetInt64(0);
+                cachedAt = DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(1));
+            }
+
+            using var count = Cmd(conn, null, "SELECT COUNT(*) FROM SearchCaptures WHERE SearchId = $id");
+            count.Parameters.AddWithValue("$id", id);
+            var total = Convert.ToInt32(count.ExecuteScalar());
+            var captures = LoadSnapshotPage(conn, id, Math.Max(0, offset), Math.Max(0, limit));
+            return (PagedSearchResult?)new PagedSearchResult(id, cachedAt, captures, total);
+        }, ct);
+
     public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind,
         CancellationToken ct = default) => Task.Run(() =>
     {
@@ -405,6 +428,33 @@ public sealed class SqliteArchiveStore : IArchiveStore
                 reader.GetInt64(5) != 0));
         }
         return new SearchSnapshot(searchId, cachedAt, list);
+    }
+
+    private static IReadOnlyList<StoredCapture> LoadSnapshotPage(SqliteConnection conn, long searchId, int offset, int limit)
+    {
+        using var cmd = Cmd(conn, null, """
+            SELECT c.Id, c.CaptureTs, c.Original, c.MimeType, c.StatusCode, (p.CaptureId IS NOT NULL)
+            FROM SearchCaptures sc
+            JOIN Captures c ON c.Id = sc.CaptureId
+            LEFT JOIN Pages p ON p.CaptureId = c.Id
+            WHERE sc.SearchId = $id
+            ORDER BY c.CaptureTs DESC, c.Id DESC
+            LIMIT $limit OFFSET $offset
+            """);
+        cmd.Parameters.AddWithValue("$id", searchId);
+        cmd.Parameters.AddWithValue("$limit", limit);
+        cmd.Parameters.AddWithValue("$offset", offset);
+
+        var list = new List<StoredCapture>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            list.Add(new StoredCapture(
+                reader.GetInt64(0),
+                new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)),
+                reader.GetInt64(5) != 0));
+        }
+        return list;
     }
 
     private static BackgroundOperation ReadOperation(SqliteDataReader reader) => new(

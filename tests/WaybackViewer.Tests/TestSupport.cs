@@ -100,6 +100,7 @@ public sealed class ThrowingSaveStore : IArchiveStore
 {
     public Task InitializeAsync(CancellationToken ct = default) => Task.CompletedTask;
     public Task<SearchSnapshot?> GetSearchAsync(string prefix, string filter, CancellationToken ct = default) => Task.FromResult<SearchSnapshot?>(null);
+    public Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit, CancellationToken ct = default) => Task.FromResult<PagedSearchResult?>(null);
     public Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> captures, DateTimeOffset cachedAt, CancellationToken ct = default) => throw new NotSupportedException();
     public Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default) => Task.FromResult<StoredPage?>(null);
     public Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default) => throw new InvalidOperationException("disk full");

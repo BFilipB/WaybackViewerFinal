@@ -31,10 +31,20 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
             preload.Enqueue(result.Snapshot.Captures, prefix, activeFilter);
             var total = result.Snapshot.Captures.Count;
             var totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
-            page = Math.Min(page, totalPages);
-            var shown = mode == "server"
-                ? result.Snapshot.Captures.Skip((page - 1) * pageSize).Take(pageSize).ToArray()
-                : result.Snapshot.Captures;
+            IReadOnlyList<StoredCapture> shown = result.Snapshot.Captures;
+            if (mode == "server")
+            {
+                var requestedPage = page;
+                var paged = await store.GetSearchPageAsync(prefix, activeFilter, 0, 0, ct);
+                if (paged is not null)
+                {
+                    total = paged.TotalCount;
+                    totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
+                    page = Math.Clamp(requestedPage, 1, totalPages);
+                    paged = await store.GetSearchPageAsync(prefix, activeFilter, (page - 1) * pageSize, pageSize, ct);
+                    shown = paged?.Captures ?? [];
+                }
+            }
             return View(new CaptureListViewModel(prefix, activeFilter, shown, null,
                 result.FromDatabase, result.Snapshot.CachedAt, mode, page, pageSize, total));
         }

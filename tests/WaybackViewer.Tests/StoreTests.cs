@@ -14,7 +14,7 @@ public static class StoreScenarios
         nameof(ResavingReplacesMembershipButKeepsPages), nameof(FiltersAreIndependent), nameof(ReadyFlagFollowsSavedPages),
         nameof(PageWithAndWithoutHtml), nameof(UnknownPageIsNull), nameof(SavingAPageTwiceOverwrites),
         nameof(DuplicatesInOneSaveAreStoredOnce), nameof(SavingUnknownCaptureCreatesIt), nameof(UnicodeAndVeryLongUrls),
-        nameof(LargeSearchRoundTrip), nameof(ConcurrentSavesDoNotCollide)
+        nameof(LargeSearchRoundTrip), nameof(PagedSearchRetrieval), nameof(ConcurrentSavesDoNotCollide)
     ];
 
     private static string Unique() => "t" + Guid.NewGuid().ToString("N")[..12];
@@ -29,6 +29,20 @@ public static class StoreScenarios
     {
         await store.InitializeAsync();
         await store.InitializeAsync();
+    }
+
+    public static async Task PagedSearchRetrieval(IArchiveStore store)
+    {
+        var tag = Unique();
+        var captures = Enumerable.Range(0, 7).Select(i => Cap(tag, i)).ToList();
+        await store.SaveSearchAsync(tag, "all", captures, DateTimeOffset.UtcNow);
+
+        var page = await store.GetSearchPageAsync(tag, "all", 2, 3);
+        Assert.NotNull(page);
+        Assert.Equal(7, page!.TotalCount);
+        Assert.Equal(captures.OrderByDescending(c => c.Timestamp).Skip(2).Take(3),
+            page.Captures.Select(c => c.Capture));
+        Assert.Empty((await store.GetSearchPageAsync(tag, "all", 20, 3))!.Captures);
     }
 
     public static async Task UnknownSearchIsNull(IArchiveStore store) =>
@@ -212,12 +226,13 @@ public class InMemoryArchiveStoreTests
     [InlineData(nameof(StoreScenarios.SavingUnknownCaptureCreatesIt))]
     [InlineData(nameof(StoreScenarios.UnicodeAndVeryLongUrls))]
     [InlineData(nameof(StoreScenarios.LargeSearchRoundTrip))]
+    [InlineData(nameof(StoreScenarios.PagedSearchRetrieval))]
     [InlineData(nameof(StoreScenarios.ConcurrentSavesDoNotCollide))]
     public Task Scenario(string name) => StoreScenarios.Run(name, new InMemoryArchiveStore());
 
     [Fact]
     public void Every_scenario_is_covered_by_the_theory() =>
-        Assert.Equal(14, StoreScenarios.Names.Length);
+        Assert.Equal(15, StoreScenarios.Names.Length);
 }
 
 public class SqliteArchiveStoreTests : IDisposable
@@ -247,6 +262,7 @@ public class SqliteArchiveStoreTests : IDisposable
     [InlineData(nameof(StoreScenarios.SavingUnknownCaptureCreatesIt))]
     [InlineData(nameof(StoreScenarios.UnicodeAndVeryLongUrls))]
     [InlineData(nameof(StoreScenarios.LargeSearchRoundTrip))]
+     [InlineData(nameof(StoreScenarios.PagedSearchRetrieval))]
     [InlineData(nameof(StoreScenarios.ConcurrentSavesDoNotCollide))]
     public Task Scenario(string name) => StoreScenarios.Run(name, NewStore());
 
