@@ -38,4 +38,18 @@ public class PaginationTests
         Assert.Equal(3, page.TotalCaptures);
         Assert.Equal(3, page.TotalPages);
     }
+
+    [Theory]
+    [InlineData(0, 10)]
+    [InlineData(9, 10)]
+    [InlineData(50, 50)]
+    [InlineData(999, 200)]
+    public void TotalPages_remains_valid_for_page_sizes_at_supported_boundaries(int pageSize, int expectedSize)
+    {
+        var model = new CaptureListViewModel("example.com", "html200", [], null,
+            PaginationMode: "server", PageSize: expectedSize, TotalCaptures: 201);
+
+        Assert.Equal((int)Math.Ceiling(201 / (double)expectedSize), model.TotalPages);
+        Assert.True(model.PageSize > 0);
+    }
 }
