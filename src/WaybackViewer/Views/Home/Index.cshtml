@@ -11,6 +11,16 @@
     <option value="html" selected="@(Model.Filter == "html")">HTML pages, any status</option>
     <option value="all" selected="@(Model.Filter == "all")">Everything (incl. images, redirects)</option>
   </select>
+  <select name="pagination" aria-label="Pagination mode">
+    <option value="client" selected="@(Model.PaginationMode == "client")">Client pagination</option>
+    <option value="server" selected="@(Model.PaginationMode == "server")">Server pagination</option>
+  </select>
+  <select name="pageSize" aria-label="Captures per page">
+    @foreach (var size in new[] { 25, 50, 100, 200 })
+    {
+      <option value="@size" selected="@(Model.PageSize == size)">@size per page</option>
+    }
+  </select>
   <button type="submit">Load captures</button>
   <button type="submit" name="refresh" value="true">Refresh from Wayback</button>
 </form>
@@ -47,7 +57,7 @@ else if (Model.CachedAt is not null)
 
 @if (Model.Captures.Count > 0)
 {
-  <p id="preloadStatus" class="preload-info" role="status">@readyCount of @Model.Captures.Count captures already saved in the database.</p>
+  <p id="preloadStatus" class="preload-info" role="status">@readyCount of @(Model.PaginationMode == "server" ? Model.TotalCaptures : Model.Captures.Count) captures already saved in the database.</p>
 
   <div class="bar">
     <strong id="count">@Model.Captures.Count captures</strong>
@@ -61,6 +71,30 @@ else if (Model.CachedAt is not null)
     <button id="expAll">Export all text</button>
     <span id="expStatus"></span>
   </div>
+
+@if (Model.TotalPages > 1)
+{
+  <nav class="pager" aria-label="Capture pages" id="serverPager" data-mode="@Model.PaginationMode">
+    @if (Model.PaginationMode == "server")
+    {
+      @if (Model.Page > 1)
+      {
+        <a class="btn" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@(Model.Page - 1)&amp;pageSize=@Model.PageSize">Previous</a>
+      }
+      <span>Page @Model.Page of @Model.TotalPages (@Model.TotalCaptures captures)</span>
+      @if (Model.Page < Model.TotalPages)
+      {
+        <a class="btn" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@(Model.Page + 1)&amp;pageSize=@Model.PageSize">Next</a>
+      }
+    }
+    else
+    {
+      <button id="clientPrev" type="button">Previous</button>
+      <span id="clientPageInfo">Page 1</span>
+      <button id="clientNext" type="button">Next</button>
+    }
+  </nav>
+}
 }
 
 <div class="capture-list">
@@ -116,6 +150,24 @@ else if (Model.CachedAt is not null)
 <script>
   const cards = [...document.querySelectorAll('.card')];
   const byId = id => document.getElementById(id);
+  const paginationMode = '@Model.PaginationMode';
+  const clientPageSize = @Model.PageSize;
+  let clientPage = 1;
+
+  function renderClientPage() {
+    if (paginationMode !== 'client' || !byId('clientPageInfo')) return;
+    const totalPages = Math.max(1, Math.ceil(cards.length / clientPageSize));
+    clientPage = Math.min(Math.max(1, clientPage), totalPages);
+    cards.forEach((card, index) => {
+      card.hidden = index < (clientPage - 1) * clientPageSize || index >= clientPage * clientPageSize;
+    });
+    byId('clientPageInfo').textContent = 'Page ' + clientPage + ' of ' + totalPages + ' (' + cards.length + ' captures)';
+    byId('clientPrev').disabled = clientPage === 1;
+    byId('clientNext').disabled = clientPage === totalPages;
+  }
+  if (byId('clientPrev')) byId('clientPrev').onclick = () => { clientPage--; renderClientPage(); };
+  if (byId('clientNext')) byId('clientNext').onclick = () => { clientPage++; renderClientPage(); };
+  renderClientPage();
 
   document.addEventListener('click', e => {
     if (e.target.matches('.view')) startShow(e.target.closest('.card'));

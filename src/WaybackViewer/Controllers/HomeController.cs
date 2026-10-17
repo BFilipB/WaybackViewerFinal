@@ -9,24 +9,34 @@ namespace WaybackViewer.Controllers;
 
 public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCoordinator preload, IArchiveStore store) : Controller
 {
-    public async Task<IActionResult> Index(string? url, string? filter, bool refresh = false, CancellationToken ct = default)
+    public async Task<IActionResult> Index(string? url, string? filter, bool refresh = false,
+        string? pagination = null, int page = 1, int pageSize = 50, CancellationToken ct = default)
     {
         var activeFilter = UrlInput.NormalizeFilter(filter);
+        var mode = NormalizePaginationMode(pagination);
+        page = Math.Max(1, page);
+        pageSize = NormalizePageSize(pageSize);
 
         if (string.IsNullOrWhiteSpace(url))
-            return View(new CaptureListViewModel("", activeFilter, [], null));
+            return View(new CaptureListViewModel("", activeFilter, [], null, PaginationMode: mode, PageSize: pageSize));
 
         var prefix = UrlInput.NormalizePrefix(url);
         if (prefix is null)
             return View(new CaptureListViewModel(url.Trim(), activeFilter, [],
-                "Enter a valid URL without spaces, for example example.com/blog/."));
+                "Enter a valid URL without spaces, for example example.com/blog/.", PaginationMode: mode, PageSize: pageSize));
 
         try
         {
             var result = await catalog.GetAsync(prefix, activeFilter, refresh, ct);
             preload.Enqueue(result.Snapshot.Captures, prefix, activeFilter);
-            return View(new CaptureListViewModel(prefix, activeFilter, result.Snapshot.Captures, null,
-                result.FromDatabase, result.Snapshot.CachedAt));
+            var total = result.Snapshot.Captures.Count;
+            var totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
+            page = Math.Min(page, totalPages);
+            var shown = mode == "server"
+                ? result.Snapshot.Captures.Skip((page - 1) * pageSize).Take(pageSize).ToArray()
+                : result.Snapshot.Captures;
+            return View(new CaptureListViewModel(prefix, activeFilter, shown, null,
+                result.FromDatabase, result.Snapshot.CachedAt, mode, page, pageSize, total));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -34,7 +44,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         }
         catch (Exception ex)
         {
-            return View(new CaptureListViewModel(prefix, activeFilter, [], ex.Message));
+            return View(new CaptureListViewModel(prefix, activeFilter, [], ex.Message, PaginationMode: mode, PageSize: pageSize));
         }
     }
 
@@ -55,15 +65,18 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         Json(await store.GetOperationsAsync(activeOnly: false, ct));
 
     [HttpPost]
-    public async Task<IActionResult> StartSearch([FromForm] string? url, [FromForm] string? filter, [FromForm] bool refresh = false)
+    public async Task<IActionResult> StartSearch([FromForm] string? url, [FromForm] string? filter,
+        [FromForm] bool refresh = false, [FromForm] string? pagination = null, [FromForm] int pageSize = 50)
     {
         var prefix = UrlInput.NormalizePrefix(url);
         if (prefix is null) return BadRequest("Enter a valid URL without spaces.");
         var activeFilter = UrlInput.NormalizeFilter(filter);
+        var mode = NormalizePaginationMode(pagination);
+        pageSize = NormalizePageSize(pageSize);
         var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;
         var operation = await store.CreateOrGetOperationAsync(prefix, activeFilter, kind, DateTimeOffset.UtcNow);
         _ = RunSearchAsync(prefix, activeFilter, refresh);
-        return Json(new { operationId = operation.Id, prefix, filter = activeFilter, refresh });
+        return Json(new { operationId = operation.Id, prefix, filter = activeFilter, refresh, pagination = mode, pageSize });
     }
 
     [HttpPost]
@@ -110,6 +123,16 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
 
     private static string? NormalizeOptionalUrl(string? url) =>
         string.IsNullOrWhiteSpace(url) ? null : UrlInput.NormalizePrefix(url);
+
+    private static string NormalizePaginationMode(string? value) =>
+        string.Equals(value, "server", StringComparison.OrdinalIgnoreCase) ? "server" : "client";
+
+    private static int NormalizePageSize(int value) => value switch
+    {
+        < 10 => 10,
+        > 200 => 200,
+        _ => value
+    };
 
     /// Moves the given captures ("timestamp|url") to the front of the background download queue.
     [HttpPost]

@@ -80,4 +80,11 @@ public sealed record CaptureListViewModel(
     IReadOnlyList<StoredCapture> Captures,
     string? Error,
     bool FromDatabase = false,
-    DateTimeOffset? CachedAt = null);
+    DateTimeOffset? CachedAt = null,
+    string PaginationMode = "client",
+    int Page = 1,
+    int PageSize = 50,
+    int TotalCaptures = 0)
+{
+    public int TotalPages => Math.Max(1, (int)Math.Ceiling(TotalCaptures / (double)PageSize));
+}
