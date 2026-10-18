@@ -1,10 +1,29 @@
 # Wayback Viewer
 
+<p align="center">
+  <img src="./assets/logo.svg" alt="Wayback Viewer logo" width="860" />
+</p>
+
+<p align="center">
+  <a href="./LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-2ea44f.svg" /></a>
+  <img alt=".NET 8" src="https://img.shields.io/badge/.NET-8.0-512BD4.svg" />
+  <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-2b6cb0.svg" />
+</p>
+
 Wayback Viewer is a .NET 8 web app for loading website capture lists from the Internet Archive, browsing captures quickly,
 and persisting metadata + archived payloads for fast local replay.
 
 This README is intentionally comprehensive: setup, architecture, navigation, operations model, search behavior,
 configuration, and troubleshooting.
+
+---
+
+## Open-source license
+
+This project is open source under the **MIT License**.
+
+- Full text: [`LICENSE`](./LICENSE)
+- You can use, modify, and redistribute this project (including commercially) under MIT terms.
 
 ---
 
@@ -144,12 +163,26 @@ tests/WaybackViewer.Tests/
   - **IFrame archived page** (preferred visual replay)
   - **Fast text view** (fallback/fast read)
 - If iframe is slow/blocked, app auto-falls back to fast text view.
+- Keyboard controls:
+  - `ArrowRight` / `PageDown`: next
+  - `ArrowLeft` / `PageUp`: previous
+  - `Home` / `End`: first / last
+  - `F`: toggle full/text mode
+  - `T`: toggle text panel (in full mode)
+  - `O`: open current capture in new tab
+  - `Esc`: close slideshow
+- Navigation is throttled for key-repeat smoothness (avoids jumpy rapid-fire transitions).
+- When a capture was already loaded in this slideshow session, loading overlay is minimized and transition is near-instant.
 
 ### Export
 
 - Current page export button
 - Full filtered export button (`Export all (filtered)`)
 - Formats: `xls`, `txt`, `json`, `csv`
+- Export actions are snapshot-isolated by default (new tab):
+  - You can continue changing filters/navigation in the original tab.
+  - Export continues in the opened tab with the captured query state.
+  - If popup opening is blocked, export falls back to current-tab execution.
 
 ---
 
@@ -168,6 +201,11 @@ Notes:
 - Content search can be slower on first use for large sets because pages may need to be loaded/parsed.
 - Results are server-paginated when server mode is enabled.
 - Legacy `text:keyword` style still works for compatibility.
+- Search matching is tolerant (not overly literal):
+  - case-insensitive
+  - punctuation/extra-space tolerant token matching
+  - diacritic-insensitive (for example `café` ~= `cafe`)
+  - basic Cyrillic/Latin equivalence (`zdravo` ~= `здраво`, `njegos` ~= `његош`)
 
 ---
 
@@ -184,6 +222,13 @@ Operation states:
 - `Queued`, `Running`, `Paused`, `Stopping`, `Stopped`, `Interrupted`, `Completed`, `Failed`
 
 Capture loading/refresh and preload are independent workflows and can be controlled concurrently.
+
+UI interaction details:
+
+- Timeline selection is stable across polling refreshes.
+- Header shows operation summary (`X selected · Y active`).
+- Bulk controls (`Pause`/`Resume`/`Stop`) and row controls use busy states to prevent accidental duplicate clicks.
+- Background operation commands are grouped and refreshed coherently to reduce flicker.
 
 ---
 

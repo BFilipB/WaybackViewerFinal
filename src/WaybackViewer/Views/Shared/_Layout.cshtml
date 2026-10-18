@@ -11,6 +11,7 @@
     button, .btn { padding: 6px 10px; background: #2a2a2a; color: #eee; border: 1px solid #555;
                    cursor: pointer; text-decoration: none; font-size: 13px; }
     button:hover, .btn:hover { background: #3a3a3a; }
+    button.btn-busy, .btn.btn-busy { opacity: .85; cursor: progress; }
     .capture-list { display: flex; flex-direction: column; gap: 6px; max-width: 1100px; }
     .card { background: #1c1c1c; border: 1px solid #333; display: flex; }
     .card[hidden] { display: none; }
@@ -52,9 +53,14 @@
     .sserror[hidden] { display: none; }
     .cache-info { color: #9cc9a3; font-size: 13px; }
     .activity { max-width: 1100px; margin: 8px 0 14px; padding: 9px 10px; background: #1a1a1a; border: 1px solid #333; }
+    .search-help { max-width: 1100px; margin: -4px 0 12px; color: var(--muted); font-size: 12px; }
+    .dirty-indicator { font-size: 11px; padding: 3px 8px; border: 1px solid var(--warn); color: var(--warn); border-radius: 12px; background: rgba(236,154,60,.08); }
+    button.btn-dirty { border-color: var(--warn); color: #fff; background: linear-gradient(180deg, #6f4a1b, #4c3313); box-shadow: 0 0 0 1px rgba(236,154,60,.25) inset; }
+    button.btn-dirty:hover { background: linear-gradient(180deg, #7f5520, #5b3d17); }
     .activity-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .activity-head strong { margin-right: auto; }
     .activity-head span { color: #9cc9ff; font-size: 12px; }
+    .activity-selection { color: var(--muted) !important; border: 1px solid var(--line); padding: 2px 8px; border-radius: 999px; }
     .operation-list { margin-top: 7px; color: #bbb; font-size: 12px; }
     .operation { padding: 3px 0; display: flex; gap: 8px; flex-wrap: wrap; }
     .operation span { color: #9cc9ff; }
@@ -78,6 +84,16 @@
     /* ---- spy / dossier theme ---- */
     :root { --bg: #111418; --panel: #1c2127; --panel2: #252a31; --line: #383e47; --text: #d3d8de; --muted: #8f99a8;
             --accent: #4c90f0; --accent-d: #2d72d2; --ok: #32a467; --warn: #ec9a3c; }
+    :root[data-theme='midnight-command'] { --bg:#111418; --panel:#1c2127; --panel2:#252a31; --line:#383e47; --text:#d3d8de; --muted:#8f99a8; --accent:#4c90f0; --accent-d:#2d72d2; --ok:#32a467; --warn:#ec9a3c; }
+    :root[data-theme='obsidian-blue'] { --bg:#0f141b; --panel:#17212b; --panel2:#1f2c38; --line:#304352; --text:#d2dbe5; --muted:#91a1b2; --accent:#3ea8ff; --accent-d:#2a7fc3; --ok:#41b883; --warn:#f0a74a; }
+    :root[data-theme='graphite-amber'] { --bg:#171513; --panel:#231f1b; --panel2:#2d2721; --line:#463b2f; --text:#e0d7cd; --muted:#ab9f93; --accent:#d89a4a; --accent-d:#af7838; --ok:#4da473; --warn:#f0b25c; }
+    :root[data-theme='aurora-steel'] { --bg:#10161a; --panel:#1a242c; --panel2:#22303a; --line:#334651; --text:#d4e1e7; --muted:#8ea3ad; --accent:#57b7c8; --accent-d:#39899a; --ok:#49a16a; --warn:#d9a554; }
+    :root[data-theme='night-ops-green'] { --bg:#0e1511; --panel:#15211a; --panel2:#1d2d24; --line:#2e4738; --text:#d1dfd6; --muted:#8ea595; --accent:#4fbf82; --accent-d:#358c60; --ok:#56c98a; --warn:#d3a658; }
+    :root[data-theme='deep-violet'] { --bg:#14131c; --panel:#201f2d; --panel2:#2a2938; --line:#403e55; --text:#d8d6e6; --muted:#9a95b0; --accent:#8a7df2; --accent-d:#665bc2; --ok:#50a67c; --warn:#cfa76a; }
+    :root[data-theme='slate-cyan'] { --bg:#10181a; --panel:#192529; --panel2:#223135; --line:#365059; --text:#d1e1e4; --muted:#90a8ae; --accent:#55c6d8; --accent-d:#3495a6; --ok:#4eaf79; --warn:#d4ab5f; }
+    :root[data-theme='iron-redline'] { --bg:#181312; --panel:#251b1a; --panel2:#302322; --line:#4a3533; --text:#e1d3d1; --muted:#ac9795; --accent:#d46c67; --accent-d:#ad4f4a; --ok:#4da277; --warn:#e0a95f; }
+    :root[data-theme='carbon-gold'] { --bg:#151513; --panel:#21211c; --panel2:#2b2b24; --line:#434336; --text:#dddccf; --muted:#a4a38f; --accent:#c7aa59; --accent-d:#9b8240; --ok:#4da173; --warn:#ddb768; }
+    :root[data-theme='arctic-shadow'] { --bg:#10131a; --panel:#192131; --panel2:#222c3f; --line:#34445f; --text:#d4dded; --muted:#92a1b8; --accent:#7ea8ff; --accent-d:#5d84d6; --ok:#53a789; --warn:#d7a86b; }
     body { font-family: Inter, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
     .spy-header { display: flex; align-items: center; gap: 14px; margin: 0 0 14px; padding: 0 12px; height: 40px; max-width: 1100px;
                   border: 1px solid var(--line); background: var(--panel); font-size: 11px; text-transform: uppercase;
@@ -86,6 +102,9 @@
     .spy-header .stamp { margin-left: auto; color: var(--warn); border: 1px solid var(--warn); border-radius: 2px; padding: 1px 6px; font-size: 10px; }
     .spy-header .clock { font-family: ui-monospace, Consolas, monospace; color: var(--text); }
     .spy-header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+    .theme-switch { margin-left: 6px; display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
+    .theme-switch label { letter-spacing: .08em; text-transform: uppercase; }
+    .theme-switch select { height: 24px; padding: 2px 6px; min-width: 170px; font-size: 11px; }
     input, select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 2px; font-family: inherit; }
     input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px rgba(76,144,240,.3); }
     button, .btn { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 2px; font-family: inherit; font-size: 12px; }
@@ -153,6 +172,8 @@
       .sspanel { width: auto; height: 35vh; border-left: 0; border-top: 1px solid #333; }
       .sshint { display: none; }
       .jump input { width: 105px; }
+      .theme-switch { width: 100%; margin-left: 0; }
+      .theme-switch select { width: 100%; }
     }
   </style>
 </head>
@@ -162,11 +183,45 @@
     <b>Wayback // Archive Intercept</b>
     <span>Secure channel established</span>
     <span class="clock" id="spyClock" aria-hidden="true"></span>
+    <span class="theme-switch">
+      <label for="themeSelect">Theme</label>
+      <select id="themeSelect" aria-label="UI theme">
+        <option value="midnight-command">Midnight Command</option>
+        <option value="obsidian-blue">Obsidian Blue</option>
+        <option value="graphite-amber">Graphite Amber</option>
+        <option value="aurora-steel">Aurora Steel</option>
+        <option value="night-ops-green">Night Ops Green</option>
+        <option value="deep-violet">Deep Violet</option>
+        <option value="slate-cyan">Slate Cyan</option>
+        <option value="iron-redline">Iron Redline</option>
+        <option value="carbon-gold">Carbon Gold</option>
+        <option value="arctic-shadow">Arctic Shadow</option>
+      </select>
+    </span>
     <span class="stamp" aria-hidden="true">Archive Ops</span>
   </header>
   <script>
     (function () {
       var c = document.getElementById('spyClock');
+      var themeSelect = document.getElementById('themeSelect');
+      var storageKey = 'wb-theme';
+      var defaultTheme = 'midnight-command';
+
+      function applyTheme(theme) {
+        document.documentElement.setAttribute('data-theme', theme || defaultTheme);
+      }
+
+      var saved = localStorage.getItem(storageKey) || defaultTheme;
+      applyTheme(saved);
+      if (themeSelect) {
+        themeSelect.value = saved;
+        themeSelect.addEventListener('change', function () {
+          var selected = themeSelect.value || defaultTheme;
+          applyTheme(selected);
+          localStorage.setItem(storageKey, selected);
+        });
+      }
+
       function t() { c.textContent = new Date().toISOString().replace('T', ' ').slice(0, 19) + 'Z'; }
       t(); setInterval(t, 1000);
     })();

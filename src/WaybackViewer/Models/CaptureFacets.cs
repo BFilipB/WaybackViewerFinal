@@ -66,7 +66,7 @@ public sealed record CaptureFacets(
             .Where(s => f.Category is null || CategoryOf(s.Capture) == f.Category)
             .Where(s => f.Status is null || s.Capture.StatusCode == f.Status)
             .Where(s => f.Section is null || SectionOf(s.Capture) == f.Section)
-            .Where(s => f.Text is null || s.Capture.Original.Contains(f.Text, StringComparison.OrdinalIgnoreCase))
+            .Where(s => f.Text is null || SearchTextMatcher.Matches(f.Text, s.Capture.Original))
             .OrderByDescending(s => s.Capture.Timestamp, StringComparer.Ordinal)
             .ThenByDescending(s => s.Id)
             .ToList();

@@ -111,6 +111,18 @@ public class FacetEndpointTests
     }
 
     [Fact]
+    public void Text_filter_is_not_overly_literal_for_spacing_or_script()
+    {
+        var list = new List<StoredCapture>
+        {
+            new(1, new Capture("20190101000000", "https://example.com/здраво-svet", "text/html", "200"), true),
+            new(2, new Capture("20190201000000", "https://example.com/other-page", "text/html", "200"), false)
+        };
+
+        Assert.Single(CaptureFacets.Apply(list, new CaptureFilter(Text: "zdravo svet")));
+    }
+
+    [Fact]
     public async Task Text_prefix_search_matches_page_content()
     {
         await using var host = await AppHost.StartAsync();

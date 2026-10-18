@@ -40,19 +40,25 @@
       <option value="@size" selected="@(Model.PageSize == size)">@size per page</option>
     }
   </select>
-  <select name="searchMode" aria-label="Search mode">
+  <select id="searchModeSelect" name="searchMode" aria-label="Search mode">
     <option value="url" selected="@(Model.SearchMode == "url")">Search URLs</option>
     <option value="content" selected="@(Model.SearchMode == "content")">Search content</option>
   </select>
-  <input name="q" value="@act.Text" size="28" placeholder="Search keyword(s)" aria-label="Search captures" />
+  <input id="queryInput" name="q" value="@act.Text" size="28" placeholder="Optional filter keywords" aria-label="Search captures" />
+  <button id="applyTextFilter" type="button" title="Apply current search text/mode to the current capture list">Apply filter</button>
+  <span id="filterDirtyBadge" class="dirty-indicator" hidden>Unapplied filter changes</span>
   <button type="submit">Load captures</button>
   <button type="submit" name="refresh" value="true">Refresh from Wayback</button>
 </form>
+<p id="searchModeHelp" class="search-help" role="status"></p>
 
 <section id="activity" class="activity" aria-live="polite">
   <div class="activity-head">
     <strong>Background activity</strong>
     <span id="activityImmediate">Ready</span>
+    <span id="activitySelectionInfo" class="activity-selection">0 selected · 0 active</span>
+    <button id="selectActiveOps" type="button">Select active</button>
+    <button id="clearSelectedOps" type="button">Clear selection</button>
     <button id="pauseWork" type="button">Pause</button>
     <button id="resumeWork" type="button">Resume</button>
     <button id="stopWork" type="button">Stop</button>
@@ -302,10 +308,28 @@ else if (Model.CachedAt is not null)
   const ssModeBtn = byId('ssMode');
   const AHEAD = 1, BEHIND = 0, SPINNER_DELAY_MS = 150, TIMEOUT_MS = 20000, TEXT_LOOKAHEAD = 8, TEXT_CACHE_MAX = 80;
   const frames = new Map();                         // full view: slide index -> { el, loaded }
-  const seen = new Set();                           // full view: capture keys that finished loading once
+  const seen = new Set();                           // full view: keyOf(card) values that finished loading once
   const textPromises = new Map(), textValues = new Map();   // fast view: text cache
   let mode = localStorage.getItem('wb-mode') === 'fast' ? 'fast' : 'full';
   let list = [], idx = 0, spinnerTimer, loadTimer, boostTimer;
+  let lastNavAt = 0;
+
+  function toSlideItem(item) {
+    if (item && item.dataset) return item;
+    const ts = item?.ts || '';
+    const url = item?.url || '';
+    const archiveUrl = item?.archiveUrl || ('https://web.archive.org/web/' + ts + '/' + url);
+    const frameUrl = item?.frameUrl || ('/Home/Frame?ts=' + ts + '&url=' + encodeURIComponent(url));
+    return {
+      dataset: {
+        ts,
+        url,
+        key: archiveUrl,
+        frame: frameUrl,
+        ready: item?.ready ? '1' : '0'
+      }
+    };
+  }
 
   const keyOf = card => card.dataset.ts + '|' + card.dataset.url;
 
@@ -382,7 +406,7 @@ else if (Model.CachedAt is not null)
     f = { el, loaded: false };
     el.addEventListener('load', () => {
       f.loaded = true;
-      seen.add(card.dataset.key);
+      seen.add(keyOf(card));
       card.dataset.ready = '1';
       if (i === idx && !ss.hidden && mode === 'full') onCurrentLoaded();
     });
@@ -411,7 +435,7 @@ else if (Model.CachedAt is not null)
     if (idx > 0 && BEHIND > 0) frameFor(idx - 1);
 
     ssLoading.hidden = true;
-    if (!(current.loaded || seen.has(card.dataset.key))) {
+    if (!(current.loaded || seen.has(keyOf(card)))) {
       spinnerTimer = setTimeout(() => {
         if (current.loaded) return;
         ssLoadingText.textContent = 'Loading capture ' + (idx + 1) + ' of ' + list.length + '...';
@@ -458,8 +482,9 @@ else if (Model.CachedAt is not null)
     }, 150);
   }
 
-  function startShow(startCard = null) {
-    list = [...cards].sort((a, b) => a.dataset.ts.localeCompare(b.dataset.ts));
+  function startShow(startCard = null, source = null) {
+    const base = source ? source.map(toSlideItem) : [...cards].map(toSlideItem);
+    list = base.sort((a, b) => a.dataset.ts.localeCompare(b.dataset.ts));
     if (!list.length) { alert('No captures available.'); return; }
     idx = startCard ? Math.max(0, list.indexOf(startCard)) : 0;
     updateModeButton();
@@ -490,11 +515,39 @@ else if (Model.CachedAt is not null)
     ss.hidden = true;
     document.body.style.overflow = '';
   }
-  function nextSlide() { if (idx < list.length - 1) { idx++; showSlide(); } else { closeShow(); alert('End of list.'); } }
-  function prevSlide() { if (idx > 0) { idx--; showSlide(); } }
+  function showEdgeHint(text) {
+    ssError.textContent = text;
+    ssError.hidden = false;
+    setTimeout(() => {
+      if (!ss.hidden) ssError.hidden = true;
+    }, 900);
+  }
+  function nextSlide() {
+    if (idx < list.length - 1) { idx++; showSlide(); return; }
+    showEdgeHint('End of slideshow.');
+  }
+  function prevSlide() {
+    if (idx > 0) { idx--; showSlide(); return; }
+    showEdgeHint('Start of slideshow.');
+  }
 
   const playAll = byId('playAll');
   if (playAll) playAll.onclick = () => startShow();
+  const playAllAll = byId('playAllAll');
+  if (playAllAll) playAllAll.onclick = async () => {
+    try {
+      playAllAll.disabled = true;
+      playAllAll.textContent = 'Loading full set...';
+      const all = await fetchCaptureSet();
+      if (!all || !all.length) { alert('No captures available for current filters.'); return; }
+      startShow(null, all);
+    } catch {
+      alert('Could not open slideshow for full filtered set.');
+    } finally {
+      playAllAll.disabled = false;
+      playAllAll.textContent = 'Slideshow all (filtered)';
+    }
+  };
   byId('ssJumpBtn').onclick = () => jumpTo(byId('ssJump').value);
   byId('ssJump').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); jumpTo(e.target.value); } });
   byId('ssClose').onclick = closeShow;
@@ -509,8 +562,16 @@ else if (Model.CachedAt is not null)
   document.addEventListener('keydown', e => {
     if (ss.hidden) return;
     if (e.target && e.target.id === 'ssJump') return;
+    if (e.altKey || e.ctrlKey || e.metaKey) return;
+    if (e.repeat && (e.key === 'ArrowRight' || e.key === 'PageDown' || e.key === 'ArrowLeft' || e.key === 'PageUp')) {
+      const now = Date.now();
+      if (now - lastNavAt < 70) { e.preventDefault(); return; }
+      lastNavAt = now;
+    }
     if (e.key === 'ArrowRight' || e.key === 'PageDown') { e.preventDefault(); nextSlide(); }
     else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); prevSlide(); }
+    else if (e.key === 'Home') { e.preventDefault(); idx = 0; showSlide(); }
+    else if (e.key === 'End') { e.preventDefault(); idx = list.length - 1; showSlide(); }
     else if (e.key === 'f' || e.key === 'F') setMode(mode === 'fast' ? 'full' : 'fast');
     else if (e.key === 'o' || e.key === 'O') window.open(list[idx].dataset.key, '_blank', 'noopener');
     else if ((e.key === 't' || e.key === 'T') && mode === 'full') toggleText();
@@ -564,6 +625,24 @@ else if (Model.CachedAt is not null)
   pollPreloadStatus();
 
   let exporting = false, cancelExport = false;
+  let lastExportLaunchAt = 0;
+  const busyButtonText = new WeakMap();
+  function setButtonBusy(button, busy, busyText = null) {
+    if (!button) return;
+    if (busy) {
+      if (!busyButtonText.has(button)) busyButtonText.set(button, button.textContent);
+      button.disabled = true;
+      button.classList.add('btn-busy');
+      if (busyText) button.textContent = busyText;
+      return;
+    }
+    button.disabled = false;
+    button.classList.remove('btn-busy');
+    if (busyButtonText.has(button)) {
+      button.textContent = busyButtonText.get(button);
+      busyButtonText.delete(button);
+    }
+  }
   const csvCell = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
   const htmlCell = v => String(v ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -605,12 +684,18 @@ else if (Model.CachedAt is not null)
     return await r.json();
   }
 
+  function setExportButtonsBusy(busy) {
+    setButtonBusy(expAll, busy, 'Exporting...');
+    setButtonBusy(expAllFiltered, busy, 'Exporting...');
+  }
+
   async function exportText(items = cards) {
     const st = byId('expStatus');
     if (exporting) { cancelExport = true; return; }
     if (!items.length) { alert('No captures available.'); return; }
     const fmt = byId('expFmt').value;
     exporting = true; cancelExport = false;
+    setExportButtonsBusy(true);
     const out = [];
     let nextItem = 0;
     async function worker() {
@@ -634,23 +719,44 @@ else if (Model.CachedAt is not null)
         st.textContent = 'Exporting ' + out.length + ' / ' + items.length + (failed ? ' (' + failed + ' failed)' : '') + ' - click again to stop';
       }
     }
-    await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
-    out.sort((a, b) => a.i - b.i);
-    const isExcel = fmt === 'xls';
-    const blob = new Blob([buildFile(out, fmt)], { type: isExcel ? 'application/vnd.ms-excel' : 'text/plain;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'wayback-export-all.' + (isExcel ? 'xls' : fmt);
-    a.click();
-    const failedCount = out.filter(o => o.error).length;
-    st.textContent = 'Saved ' + out.length + ' pages' + (cancelExport ? ' (stopped early)' : '') +
-      (failedCount ? ' with ' + failedCount + ' errors' : '');
-    exporting = false;
+    try {
+      await Promise.all([worker(), worker(), worker(), worker(), worker(), worker()]);
+      out.sort((a, b) => a.i - b.i);
+      const isExcel = fmt === 'xls';
+      const blob = new Blob([buildFile(out, fmt)], { type: isExcel ? 'application/vnd.ms-excel' : 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'wayback-export-all.' + (isExcel ? 'xls' : fmt);
+      a.click();
+      const failedCount = out.filter(o => o.error).length;
+      st.textContent = 'Saved ' + out.length + ' pages' + (cancelExport ? ' (stopped early)' : '') +
+        (failedCount ? ' with ' + failedCount + ' errors' : '');
+    } finally {
+      exporting = false;
+      setExportButtonsBusy(false);
+    }
   }
   const expAll = byId('expAll');
-  if (expAll) expAll.onclick = () => exportText(cards);
+  function openExportWindow(mode) {
+    const now = Date.now();
+    if (now - lastExportLaunchAt < 600) return true;
+    lastExportLaunchAt = now;
+    const current = new URL(location.href);
+    current.searchParams.set('exportMode', mode);
+    current.searchParams.set('exportFmt', byId('expFmt')?.value || 'xls');
+    const opened = window.open(current.toString(), '_blank', 'noopener');
+    return !!opened;
+  }
+
+  if (expAll) expAll.onclick = () => {
+    if (exporting) return;
+    if (openExportWindow('page')) return;
+    exportText(cards);
+  };
   const expAllFiltered = byId('expAllFiltered');
   if (expAllFiltered) expAllFiltered.onclick = async () => {
+    if (exporting) return;
+    if (openExportWindow('filtered')) return;
     try {
       const all = await fetchCaptureSet();
       await exportText(all);
@@ -658,6 +764,37 @@ else if (Model.CachedAt is not null)
       byId('expStatus').textContent = (e && e.message) ? e.message : 'Could not export full filtered set.';
     }
   };
+
+  async function maybeAutoStartExportFromQuery() {
+    const q = new URLSearchParams(location.search);
+    const mode = (q.get('exportMode') || '').toLowerCase();
+    if (mode !== 'page' && mode !== 'filtered') return;
+
+    const fmt = (q.get('exportFmt') || '').toLowerCase();
+    const fmtSelect = byId('expFmt');
+    if (fmtSelect && ['xls', 'txt', 'json', 'csv'].includes(fmt)) fmtSelect.value = fmt;
+
+    const clean = new URL(location.href);
+    clean.searchParams.delete('exportMode');
+    clean.searchParams.delete('exportFmt');
+    history.replaceState(null, '', clean.pathname + clean.search + clean.hash);
+
+    byId('expStatus').textContent = mode === 'filtered'
+      ? 'Export started in this tab (full filtered set)...'
+      : 'Export started in this tab (current page)...';
+
+    try {
+      if (mode === 'filtered') {
+        const all = await fetchCaptureSet();
+        await exportText(all);
+      } else {
+        await exportText(cards);
+      }
+    } catch (e) {
+      byId('expStatus').textContent = (e && e.message) ? e.message : 'Could not start export.';
+    }
+  }
+  maybeAutoStartExportFromQuery();
 
   // ---------------------------------------------------------------- durable background activity
   const operationStates = ['Queued', 'Running', 'Paused', 'Stopping', 'Stopped', 'Interrupted', 'Completed', 'Failed'];
@@ -669,7 +806,13 @@ else if (Model.CachedAt is not null)
   const captureText = byId('captureText');
   const preloadText = byId('preloadText');
   const searchBar = byId('searchBar');
+  const searchModeSelect = byId('searchModeSelect');
+  const queryInput = byId('queryInput');
+  const applyTextFilterBtn = byId('applyTextFilter');
+  const filterDirtyBadge = byId('filterDirtyBadge');
+  const searchModeHelp = byId('searchModeHelp');
   let pendingSearch = null;
+  let lastAppliedFilterState = null;
   const stateText = state => operationStates[state] || 'Unknown';
   const kindText = kind => operationKinds[kind] || 'Unknown';
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -690,6 +833,84 @@ else if (Model.CachedAt is not null)
     bar.className = wf.error ? 'wf-err' : (wf.active ? 'wf-on' : 'wf-done');
   }
 
+  function searchContextFromForm() {
+    return {
+      url: searchBar?.querySelector('[name=url]')?.value || '',
+      filter: searchBar?.querySelector('[name=filter]')?.value || 'html200',
+      pagination: searchBar?.querySelector('[name=pagination]')?.value || 'server',
+      pageSize: searchBar?.querySelector('[name=pageSize]')?.value || '50',
+      searchMode: searchModeSelect?.value || 'url',
+      q: queryInput?.value || ''
+    };
+  }
+
+  function buildTargetUrl(payload) {
+    const params = new URLSearchParams();
+    params.set('url', payload.url || '');
+    params.set('filter', payload.filter || 'html200');
+    params.set('pagination', payload.pagination || 'server');
+    params.set('pageSize', String(payload.pageSize || 50));
+    params.set('searchMode', payload.searchMode || 'url');
+    if ((payload.q || '').trim()) params.set('q', payload.q.trim());
+    return '/?' + params.toString();
+  }
+
+  function currentFilterState() {
+    const s = searchContextFromForm();
+    return JSON.stringify({
+      url: (s.url || '').trim(),
+      filter: s.filter || 'html200',
+      searchMode: s.searchMode || 'url',
+      q: (s.q || '').trim()
+    });
+  }
+
+  function updateFilterDirtyBadge() {
+    if (!filterDirtyBadge) return;
+    const current = currentFilterState();
+    const dirty = lastAppliedFilterState !== null && current !== lastAppliedFilterState;
+    filterDirtyBadge.hidden = !dirty;
+    if (applyTextFilterBtn) {
+      applyTextFilterBtn.classList.toggle('btn-dirty', dirty);
+      applyTextFilterBtn.setAttribute('aria-label', dirty ? 'Apply filter changes (pending)' : 'Apply filter');
+    }
+  }
+
+  function updateSearchHelp() {
+    if (!searchModeHelp) return;
+    const mode = searchModeSelect?.value || 'url';
+    if (mode === 'content') {
+      searchModeHelp.textContent = 'Content mode: type text in "Search captures" and click "Apply filter" (or Load captures/Refresh) to run content filtering.';
+      if (queryInput) queryInput.placeholder = 'Type text to find inside archived page content';
+      return;
+    }
+    searchModeHelp.textContent = 'URL mode: URL box controls capture loading. "Search captures" is an optional extra filter applied when you click "Apply filter".';
+    if (queryInput) queryInput.placeholder = 'Optional filter keywords';
+  }
+
+  updateSearchHelp();
+  lastAppliedFilterState = currentFilterState();
+  updateFilterDirtyBadge();
+  if (searchModeSelect) searchModeSelect.addEventListener('change', updateSearchHelp);
+  if (searchBar) {
+    searchBar.addEventListener('input', updateFilterDirtyBadge);
+    searchBar.addEventListener('change', updateFilterDirtyBadge);
+  }
+
+  if (applyTextFilterBtn) applyTextFilterBtn.onclick = () => {
+    const payload = searchContextFromForm();
+    if (!payload.url.trim()) {
+      activityImmediate.textContent = 'Enter a URL/prefix first, then apply a filter.';
+      return;
+    }
+    activityImmediate.textContent = payload.searchMode === 'content'
+      ? 'Applying content filter...'
+      : 'Applying URL filter...';
+    lastAppliedFilterState = currentFilterState();
+    updateFilterDirtyBadge();
+    location.href = buildTargetUrl(payload);
+  };
+
   if (searchBar) searchBar.addEventListener('submit', async e => {
     e.preventDefault();
     const refresh = e.submitter && e.submitter.name === 'refresh';
@@ -702,10 +923,17 @@ else if (Model.CachedAt is not null)
       const response = await fetch('/Home/StartSearch', { method: 'POST', body: data });
       if (!response.ok) throw new Error(await response.text());
        pendingSearch = await response.json();
-       const target = '/?url=' + encodeURIComponent(pendingSearch.prefix) +
-         '&filter=' + encodeURIComponent(pendingSearch.filter) +
-         '&pagination=' + encodeURIComponent(pendingSearch.pagination || 'server') +
-         '&pageSize=' + encodeURIComponent(pendingSearch.pageSize || 50);
+       const current = searchContextFromForm();
+       lastAppliedFilterState = currentFilterState();
+       updateFilterDirtyBadge();
+       const target = buildTargetUrl({
+         url: pendingSearch.prefix,
+         filter: pendingSearch.filter,
+         pagination: pendingSearch.pagination || current.pagination,
+         pageSize: pendingSearch.pageSize || current.pageSize,
+         searchMode: pendingSearch.searchMode || current.searchMode,
+         q: current.q
+       });
        if (pendingSearch.cached) {
          activityImmediate.textContent = 'Capture list already loaded; opening saved results...';
          location.href = target;
@@ -722,53 +950,124 @@ else if (Model.CachedAt is not null)
     }
   });
 
-  async function operationCommand(name, operationId = null) {
-    activityImmediate.textContent = name === 'Pause' ? 'Pausing downloads...' :
-      name === 'Resume' ? 'Resuming downloads...' : 'Stopping downloads...';
-    try {
-      const query = operationId
-        ? '?operationId=' + encodeURIComponent(operationId)
-        : '?url=' + encodeURIComponent(searchBar.querySelector('[name=url]').value) +
-          '&filter=' + encodeURIComponent(searchBar.querySelector('[name=filter]').value);
-      await fetch('/Home/' + name + query, { method: 'POST' });
-      await pollWorkflow();
-    } catch { activityImmediate.textContent = 'Could not change background activity.'; }
+  async function sendOperationCommand(name, operationId = null) {
+    const query = operationId
+      ? '?operationId=' + encodeURIComponent(operationId)
+      : '?url=' + encodeURIComponent(searchBar.querySelector('[name=url]').value) +
+        '&filter=' + encodeURIComponent(searchBar.querySelector('[name=filter]').value);
+    const response = await fetch('/Home/' + name + query, { method: 'POST' });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
   }
 
   function selectedOperationIds() {
-    return [...workflowTimeline.querySelectorAll('.operation-select:checked')].map(x => x.value);
+    return [...selectedOperationIdsState];
   }
 
-  async function commandSelected(name) {
+  function isActiveState(state) {
+    return [0, 1, 2, 3, 5].includes(state);
+  }
+
+  function updateActivityControls(operations) {
+    const activeCount = (operations || []).filter(o => isActiveState(o.state)).length;
+    const selected = selectedOperationIds().length;
+    if (activitySelectionInfo) activitySelectionInfo.textContent = `${selected} selected · ${activeCount} active`;
+
+    const busy = commandInFlight;
+    if (selectActiveOpsBtn) selectActiveOpsBtn.disabled = busy || activeCount === 0;
+    if (clearSelectedOpsBtn) clearSelectedOpsBtn.disabled = busy || selected === 0;
+
+    const canBulk = !busy && (selected > 0 || activeCount > 0);
+    if (pauseWorkBtn) pauseWorkBtn.disabled = !canBulk;
+    if (resumeWorkBtn) resumeWorkBtn.disabled = !canBulk;
+    if (stopWorkBtn) stopWorkBtn.disabled = !canBulk;
+  }
+
+  async function commandSelected(name, explicitIds = null) {
+    if (commandInFlight) return;
     const ids = selectedOperationIds();
-    if (!ids.length) {
-      // fallback to current query workflow only
-      await operationCommand(name);
+    const targetIds = explicitIds ?? ids;
+    activityImmediate.textContent = name === 'Pause' ? 'Pausing downloads...' :
+      name === 'Resume' ? 'Resuming downloads...' : 'Stopping downloads...';
+    commandInFlight = true;
+    updateActivityControls(lastOperations);
+    const actionButton = name === 'Pause' ? pauseWorkBtn : name === 'Resume' ? resumeWorkBtn : stopWorkBtn;
+    setButtonBusy(actionButton, true, name + '...');
+    if (!targetIds.length) {
+      try {
+        await sendOperationCommand(name);
+        await pollWorkflow();
+      } catch {
+        activityImmediate.textContent = 'Could not change background activity.';
+      } finally {
+        commandInFlight = false;
+        setButtonBusy(actionButton, false);
+        updateActivityControls(lastOperations);
+      }
       return;
     }
-    for (const id of ids) await operationCommand(name, id);
+    try {
+      await Promise.all(targetIds.map(id => sendOperationCommand(name, id)));
+      await pollWorkflow();
+    } catch {
+      activityImmediate.textContent = 'Could not change background activity.';
+    } finally {
+      commandInFlight = false;
+      setButtonBusy(actionButton, false);
+      updateActivityControls(lastOperations);
+    }
   }
 
-  byId('pauseWork').onclick = () => commandSelected('Pause');
-  byId('resumeWork').onclick = () => commandSelected('Resume');
-  byId('stopWork').onclick = () => commandSelected('Stop');
+  if (selectActiveOpsBtn) selectActiveOpsBtn.onclick = () => {
+    selectedOperationIdsState.clear();
+    for (const op of (lastOperations || [])) {
+      if (isActiveState(op.state)) selectedOperationIdsState.add(String(op.id));
+    }
+    renderOperationTimeline(lastOperations);
+    updateActivityControls(lastOperations);
+  };
+
+  if (clearSelectedOpsBtn) clearSelectedOpsBtn.onclick = () => {
+    selectedOperationIdsState.clear();
+    renderOperationTimeline(lastOperations);
+    updateActivityControls(lastOperations);
+  };
+
+  if (pauseWorkBtn) pauseWorkBtn.onclick = () => commandSelected('Pause');
+  if (resumeWorkBtn) resumeWorkBtn.onclick = () => commandSelected('Resume');
+  if (stopWorkBtn) stopWorkBtn.onclick = () => commandSelected('Stop');
+
+  workflowTimeline.addEventListener('change', e => {
+    const cb = e.target.closest('.operation-select');
+    if (!cb) return;
+    if (cb.checked) selectedOperationIdsState.add(cb.value);
+    else selectedOperationIdsState.delete(cb.value);
+    updateActivityControls(lastOperations);
+  });
 
   workflowTimeline.addEventListener('click', e => {
     const button = e.target.closest('[data-operation-command]');
     if (!button) return;
-    operationCommand(button.dataset.operationCommand, button.dataset.operationId);
+    setButtonBusy(button, true, button.dataset.operationCommand + '...');
+    commandSelected(button.dataset.operationCommand, [button.dataset.operationId])
+      .finally(() => setButtonBusy(button, false));
   });
 
   function renderOperationTimeline(operations) {
     if (!workflowTimeline) return;
+    lastOperations = operations || [];
+    const knownIds = new Set(lastOperations.map(o => String(o.id)));
+    for (const id of [...selectedOperationIdsState]) {
+      if (!knownIds.has(id)) selectedOperationIdsState.delete(id);
+    }
     const visible = (operations || []).slice(0, 24);
     workflowTimeline.innerHTML = visible.length
       ? visible.map(o => {
           const progress = o.total ? ` (${o.completed}/${o.total})` : '';
           const error = o.error ? ` <span class="operation-error">${esc(o.error)}</span>` : '';
           const active = [0, 1, 2, 3, 5].includes(o.state);
+          const checked = selectedOperationIdsState.has(String(o.id)) ? ' checked' : '';
           const controls = active
-            ? `<label><input type="checkbox" class="operation-select" value="${o.id}" aria-label="Select ${esc(kindText(o.kind))} for ${esc(o.prefix)}"></label>
+            ? `<label><input type="checkbox" class="operation-select" value="${o.id}"${checked} aria-label="Select ${esc(kindText(o.kind))} for ${esc(o.prefix)}"></label>
                <button type="button" data-operation-command="Pause" data-operation-id="${o.id}">Pause</button>
                <button type="button" data-operation-command="Resume" data-operation-id="${o.id}">Resume</button>
                <button type="button" data-operation-command="Stop" data-operation-id="${o.id}">Stop</button>`
@@ -776,6 +1075,7 @@ else if (Model.CachedAt is not null)
           return `<div class="operation"><span>${controls}</span><strong>${esc(kindText(o.kind))}: ${esc(o.prefix)}</strong><span>${esc(stateText(o.state))}${progress}</span>${error}</div>`;
         }).join('')
       : 'No workflow events yet.';
+    updateActivityControls(lastOperations);
   }
 
   async function pollWorkflow() {

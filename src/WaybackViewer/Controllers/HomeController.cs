@@ -113,7 +113,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     private async Task<List<StoredCapture>> ApplyFullTextFilterAsync(IReadOnlyList<StoredCapture> captures, string term, CancellationToken ct)
     {
         if (term.Length == 0) return captures.ToList();
-        var key = term.ToLowerInvariant();
+        var key = SearchTextMatcher.CacheKey(term);
 
         if (textSearchCache.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow - cached.At < TimeSpan.FromMinutes(10))
             return cached.Items;
@@ -122,7 +122,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         foreach (var item in captures)
         {
             ct.ThrowIfCancellationRequested();
-            if (item.Capture.Original.Contains(term, StringComparison.OrdinalIgnoreCase))
+            if (SearchTextMatcher.Matches(term, item.Capture.Original))
             {
                 results.Add(item);
                 continue;
@@ -132,9 +132,10 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
             {
                 var page = await pages.GetAsync(item.Capture.Timestamp, item.Capture.Original, includeHtml: false, ct);
                 if (page is null) continue;
-                if ((page.Parsed.Title?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                    (page.Parsed.Description?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                    page.Parsed.Text.Contains(term, StringComparison.OrdinalIgnoreCase))
+                if (SearchTextMatcher.MatchesAny(term,
+                    page.Parsed.Title,
+                    page.Parsed.Description,
+                    page.Parsed.Text))
                     results.Add(item);
             }
             catch
@@ -153,9 +154,10 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
                 {
                     var page = await pages.GetAsync(item.Capture.Timestamp, item.Capture.Original, includeHtml: false, ct);
                     if (page is null) continue;
-                    if ((page.Parsed.Title?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                        (page.Parsed.Description?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                        page.Parsed.Text.Contains(term, StringComparison.OrdinalIgnoreCase))
+                    if (SearchTextMatcher.MatchesAny(term,
+                        page.Parsed.Title,
+                        page.Parsed.Description,
+                        page.Parsed.Text))
                         results.Add(item);
                 }
                 catch
