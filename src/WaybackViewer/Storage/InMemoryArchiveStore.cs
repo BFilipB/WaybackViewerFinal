@@ -5,6 +5,7 @@ namespace WaybackViewer.Storage;
 /// Volatile store: used by the tests and for "Storage:Provider": "Memory". Mirrors SqlArchiveStore semantics.
 public sealed class InMemoryArchiveStore : IArchiveStore
 {
+    private readonly HtmlFileStore htmlFiles;
     private readonly object gate = new();
     private long nextCaptureId = 1;
     private long nextSearchId = 1;
@@ -19,6 +20,10 @@ public sealed class InMemoryArchiveStore : IArchiveStore
     /// Sizes of every SavePagesAsync call (lets tests verify batching).
     public IReadOnlyList<int> SaveBatchSizes { get { lock (gate) return saveBatchSizes.ToArray(); } }
     public int PageCount { get { lock (gate) return pages.Count; } }
+
+    public InMemoryArchiveStore() : this(new HtmlFileStore(AppBuilder.ResolveDatabasePath("html-payloads-memory"))) { }
+
+    public InMemoryArchiveStore(HtmlFileStore htmlFiles) => this.htmlFiles = htmlFiles;
 
     public Task InitializeAsync(CancellationToken ct = default) => Task.CompletedTask;
 
@@ -78,7 +83,10 @@ public sealed class InMemoryArchiveStore : IArchiveStore
         {
             if (!captureIds.TryGetValue(Key(timestamp, original), out var id) || !pages.TryGetValue(id, out var page))
                 return Task.FromResult<StoredPage?>(null);
-            return Task.FromResult<StoredPage?>(includeHtml ? page : page with { HtmlGz = null });
+            if (!includeHtml) return Task.FromResult<StoredPage?>(page with { HtmlGz = null });
+
+            var html = htmlFiles.LoadAsync(page.Capture, ct).GetAwaiter().GetResult() ?? page.HtmlGz;
+            return Task.FromResult<StoredPage?>(page with { HtmlGz = html });
         }
     }
 
@@ -90,7 +98,8 @@ public sealed class InMemoryArchiveStore : IArchiveStore
             foreach (var p in newPages)
             {
                 var id = EnsureCapture(p.Capture);
-                pages[id] = new StoredPage(captures[id], p.HtmlGz, p.Parsed, p.FetchedAt);
+                htmlFiles.SaveAsync(p.Capture, p.HtmlGz, ct).GetAwaiter().GetResult();
+                pages[id] = new StoredPage(captures[id], null, p.Parsed, p.FetchedAt);
             }
         }
         return Task.CompletedTask;

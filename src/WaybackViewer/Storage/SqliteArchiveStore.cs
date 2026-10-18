@@ -58,13 +58,25 @@ public sealed class SqliteArchiveStore : IArchiveStore
             Failed      INTEGER NOT NULL,
             Error       TEXT,
             UNIQUE (UrlPrefix, Filter, Kind))
-        """
+        """,
+        "CREATE INDEX IF NOT EXISTS IX_SearchCaptures_CaptureId ON SearchCaptures (CaptureId)",
+        "CREATE INDEX IF NOT EXISTS IX_Operations_State ON Operations (State, UpdatedAt)"
     ];
 
     private readonly string connectionString;
+    private readonly HtmlFileStore htmlFiles;
     private readonly SemaphoreSlim writeLock = new(1, 1);
 
-    public SqliteArchiveStore(string connectionString) => this.connectionString = connectionString;
+    public SqliteArchiveStore(string connectionString)
+        : this(connectionString, new HtmlFileStore(AppBuilder.ResolveDatabasePath("html-payloads")))
+    {
+    }
+
+    public SqliteArchiveStore(string connectionString, HtmlFileStore htmlFiles)
+    {
+        this.connectionString = connectionString;
+        this.htmlFiles = htmlFiles;
+    }
 
     public Task InitializeAsync(CancellationToken ct = default) => WriteAsync(() =>
     {
@@ -82,6 +94,7 @@ public sealed class SqliteArchiveStore : IArchiveStore
             using var cmd = Cmd(conn, null, sql);
             cmd.ExecuteNonQuery();
         }
+        using (var optimize = Cmd(conn, null, "PRAGMA optimize")) optimize.ExecuteNonQuery();
         return 0;
     }, ct);
 
@@ -319,7 +332,16 @@ public sealed class SqliteArchiveStore : IArchiveStore
                 reader.IsDBNull(5) ? null : reader.GetString(5),
                 reader.GetString(6));
             var fetchedAt = DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(7));
-            var html = includeHtml ? reader.GetFieldValue<byte[]>(8) : null;
+            byte[]? html = null;
+            if (includeHtml)
+            {
+                html = htmlFiles.LoadAsync(capture, ct).GetAwaiter().GetResult();
+                if (html is null && !reader.IsDBNull(8))
+                {
+                    var legacy = reader.GetFieldValue<byte[]>(8);
+                    if (legacy.Length > 0) html = legacy;
+                }
+            }
             return (StoredPage?)new StoredPage(capture, html, parsed, fetchedAt);
         }, ct);
 
@@ -369,7 +391,8 @@ public sealed class SqliteArchiveStore : IArchiveStore
                 pD.Value = (object?)page.Parsed.Description ?? DBNull.Value;
                 pAt.Value = page.FetchedAt.ToUnixTimeMilliseconds();
                 tB.Value = page.Parsed.Text;
-                hH.Value = page.HtmlGz;
+                htmlFiles.SaveAsync(page.Capture, page.HtmlGz, ct).GetAwaiter().GetResult();
+                hH.Value = Array.Empty<byte>();
                 insertPage.ExecuteNonQuery();
                 insertText.ExecuteNonQuery();
                 insertHtml.ExecuteNonQuery();

@@ -179,6 +179,55 @@ public class PreloadCoordinatorTests
         coordinator.Dispose();
         Assert.Equal(0, coordinator.Enqueue(SampleData.Stored(SampleData.Captures(3))));
     }
+
+    [Fact]
+    public async Task Operation_updates_are_serialized_and_final_state_is_not_lost()
+    {
+        var store = new SlowOperationStore();
+        var loader = new FakePageLoader { Hook = _ => Task.Delay(15) };
+        var coordinator = new PreloadCoordinator(loader, store,
+            Options.Create(new PreloadOptions { Workers = 2, WriteBatchSize = 10, WriteMaxDelayMs = 20 }),
+            NullLogger<PreloadCoordinator>.Instance);
+
+        var captures = SampleData.Stored(SampleData.Captures(8));
+        coordinator.Enqueue(captures, "example.com/", "html200");
+        await Task.Delay(25);
+        coordinator.Pause("example.com/", "html200");
+        coordinator.Resume("example.com/", "html200");
+        await coordinator.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await SampleData.Eventually(async () =>
+        {
+            var latest = (await store.GetOperationsAsync())
+                .Single(o => o.Prefix == "example.com/" && o.Filter == "html200" && o.Kind == OperationKind.PagePreload);
+            return latest.State is OperationState.Completed or OperationState.Failed;
+        }, timeoutMs: 5000);
+
+        var op = (await store.GetOperationsAsync()).Single(o => o.Prefix == "example.com/" && o.Filter == "html200" && o.Kind == OperationKind.PagePreload);
+        Assert.True(op.State is OperationState.Completed or OperationState.Failed);
+        Assert.True(op.Completed + op.Failed >= op.Total);
+        Assert.True(store.UpdateCalls > 0);
+    }
+
+    [Fact]
+    public async Task StopAsync_waits_for_pending_save_batch_before_returning()
+    {
+        var store = new DelayedSaveStore();
+        var loader = new FakePageLoader();
+        var coordinator = new PreloadCoordinator(loader, store,
+            Options.Create(new PreloadOptions { Workers = 1, WriteBatchSize = 50, WriteMaxDelayMs = 10 }),
+            NullLogger<PreloadCoordinator>.Instance);
+
+        coordinator.Enqueue(SampleData.Stored(SampleData.Captures(3)));
+        await store.SaveStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var stopping = coordinator.StopAsync(cts.Token);
+        await Task.Delay(100); // should still be waiting because save is blocked
+        Assert.False(stopping.IsCompleted);
+
+        store.SaveGate.TrySetResult();
+        await stopping.WaitAsync(TimeSpan.FromSeconds(5));
+    }
 }
 
 public class CaptureCatalogTests

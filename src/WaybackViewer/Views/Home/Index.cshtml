@@ -2,6 +2,25 @@
 @{
     ViewData["Title"] = "Wayback Viewer";
     var readyCount = Model.Captures.Count(c => c.Ready);
+    var act = Model.Active ?? new CaptureFilter();
+    string Qs(int p, string? year, string? cat, string? st, string? sec)
+    {
+        var s = "?url=" + Uri.EscapeDataString(Model.Url) + "&amp;filter=" + Uri.EscapeDataString(Model.Filter)
+            + "&amp;pagination=" + Model.PaginationMode + "&amp;page=" + p + "&amp;pageSize=" + Model.PageSize + "&amp;searchMode=" + Uri.EscapeDataString(Model.SearchMode);
+        if (year is not null) s += "&amp;year=" + Uri.EscapeDataString(year);
+        if (cat is not null) s += "&amp;category=" + Uri.EscapeDataString(cat);
+        if (st is not null) s += "&amp;status=" + Uri.EscapeDataString(st);
+        if (sec is not null) s += "&amp;section=" + Uri.EscapeDataString(sec);
+        if (act.Text is not null) s += "&amp;q=" + Uri.EscapeDataString(act.Text);
+        return s;
+    }
+    string PageLink(int p) => Qs(p, act.Year, act.Category, act.Status, act.Section);
+    string Toggle(string kind, string value) => Qs(1,
+        kind == "year" ? (act.Year == value ? null : value) : act.Year,
+        kind == "category" ? (act.Category == value ? null : value) : act.Category,
+        kind == "status" ? (act.Status == value ? null : value) : act.Status,
+        kind == "section" ? (act.Section == value ? null : value) : act.Section);
+    bool IsOn(string kind, string value) => kind switch { "year" => act.Year == value, "category" => act.Category == value, "status" => act.Status == value, _ => act.Section == value };
 }
 
 <form id="searchBar" method="get" class="bar">
@@ -21,6 +40,11 @@
       <option value="@size" selected="@(Model.PageSize == size)">@size per page</option>
     }
   </select>
+  <select name="searchMode" aria-label="Search mode">
+    <option value="url" selected="@(Model.SearchMode == "url")">Search URLs</option>
+    <option value="content" selected="@(Model.SearchMode == "content")">Search content</option>
+  </select>
+  <input name="q" value="@act.Text" size="28" placeholder="Search keyword(s)" aria-label="Search captures" />
   <button type="submit">Load captures</button>
   <button type="submit" name="refresh" value="true">Refresh from Wayback</button>
 </form>
@@ -33,7 +57,11 @@
     <button id="resumeWork" type="button">Resume</button>
     <button id="stopWork" type="button">Stop</button>
   </div>
-  <div id="operationList" class="operation-list">No background operations yet.</div>
+  <div class="workflow-bars" id="workflowBars">
+    <div class="wf-row"><span class="wf-label">Capture list</span><div class="wf-track"><i id="captureBar" style="width:0%"></i></div><em id="captureText">Idle</em></div>
+    <div class="wf-row"><span class="wf-label">Page preload</span><div class="wf-track"><i id="preloadBar" style="width:0%"></i></div><em id="preloadText">Idle</em></div>
+  </div>
+  <div id="workflowTimeline" class="operation-list">No workflow events yet.</div>
 </section>
 
 @if (Model.Error is not null)
@@ -62,6 +90,7 @@ else if (Model.CachedAt is not null)
   <div class="bar">
     <strong id="count">@(Model.PaginationMode == "server" ? $"Page {Model.Page} captures ({Model.TotalCaptures} total)" : $"{Model.Captures.Count} captures")</strong>
     <button id="playAll">&#9654; @(Model.PaginationMode == "server" ? "Show this page" : "Show all captures")</button>
+    <button id="playAllAll" type="button" title="Open slideshow for every capture in current filters">Slideshow all (filtered)</button>
     <select id="expFmt">
       <option value="xls">Excel (.xls)</option>
       <option value="txt">txt</option>
@@ -69,6 +98,7 @@ else if (Model.CachedAt is not null)
       <option value="csv">csv</option>
     </select>
     <button id="expAll">@(Model.PaginationMode == "server" ? "Export this page" : "Export all text")</button>
+    <button id="expAllFiltered" type="button" title="Export every filtered capture, not just the visible page">Export all (filtered)</button>
     <span id="expStatus"></span>
   </div>
 
@@ -79,8 +109,8 @@ else if (Model.CachedAt is not null)
     {
        @if (Model.Page > 1)
       {
-          <a class="btn" aria-label="First capture page" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=1&amp;pageSize=@Model.PageSize">First</a>
-          <a class="btn" rel="prev" aria-label="Previous capture page" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@(Model.Page - 1)&amp;pageSize=@Model.PageSize">Previous</a>
+          <a class="btn" aria-label="First capture page" href="@Html.Raw(PageLink(1))">First</a>
+          <a class="btn" rel="prev" aria-label="Previous capture page" href="@Html.Raw(PageLink(Model.Page - 1))">Previous</a>
       }
        @if (Model.Page > 3)
        {
@@ -94,7 +124,7 @@ else if (Model.CachedAt is not null)
          }
          else
          {
-           <a class="btn" aria-label="Capture page @pagerPage" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@pagerPage&amp;pageSize=@Model.PageSize">@pagerPage</a>
+           <a class="btn" aria-label="Capture page @pagerPage" href="@Html.Raw(PageLink(pagerPage))">@pagerPage</a>
          }
        }
        @if (Model.Page < Model.TotalPages - 2)
@@ -103,8 +133,8 @@ else if (Model.CachedAt is not null)
        }
        @if (Model.Page < Model.TotalPages)
        {
-          <a class="btn" rel="next" aria-label="Next capture page" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@(Model.Page + 1)&amp;pageSize=@Model.PageSize">Next</a>
-          <a class="btn" aria-label="Last capture page" href="?url=@Uri.EscapeDataString(Model.Url)&amp;filter=@Uri.EscapeDataString(Model.Filter)&amp;pagination=server&amp;page=@Model.TotalPages&amp;pageSize=@Model.PageSize">Last</a>
+          <a class="btn" rel="next" aria-label="Next capture page" href="@Html.Raw(PageLink(Model.Page + 1))">Next</a>
+          <a class="btn" aria-label="Last capture page" href="@Html.Raw(PageLink(Model.TotalPages))">Last</a>
        }
     }
     else
@@ -117,7 +147,43 @@ else if (Model.CachedAt is not null)
 }
 }
 
-<div class="capture-list">
+@if (Model.Facets is { Years.Count: > 0 } facets)
+{
+  var maxYear = Math.Max(1, facets.Years.Max(y => y.Count));
+  <section class="timeline" aria-label="Capture timeline">
+    <div class="panel-title">Timeline @if (act.IsActive) { <a class="btn clear" href="@Html.Raw(Qs(1, null, null, null, null))">Clear filters</a> }</div>
+    <div class="tl-bars">
+      @foreach (var y in facets.Years)
+      {
+        <a class="tl-bar @(IsOn("year", y.Value) ? "on" : "")" href="@Html.Raw(Toggle("year", y.Value))" title="@y.Value: @y.Count captures, @y.Saved saved">
+          <span class="tl-fill" style="height:@(Math.Max(4, y.Count * 100 / maxYear))%"></span>
+          <span class="tl-label">@y.Value</span>
+        </a>
+      }
+    </div>
+  </section>
+}
+
+<div class="workspace">
+@if (Model.Facets is not null)
+{
+  <aside class="facets" aria-label="Filters">
+    @foreach (var (title, kind, items) in new[] { ("Category", "category", Model.Facets.Categories), ("Status", "status", Model.Facets.Statuses), ("Section", "section", Model.Facets.Sections) })
+    {
+      if (items.Count == 0) { continue; }
+      <div class="panel-title">@title</div>
+      <ul>
+        @foreach (var f in items)
+        {
+          <li><a class="facet @(IsOn(kind, f.Value) ? "on" : "")" href="@Html.Raw(Toggle(kind, f.Value))"><span>@f.Value</span><em>@f.Count</em></a></li>
+        }
+      </ul>
+    }
+  </aside>
+}
+<div class="main-col">
+<div class="density"><button type="button" id="densityBtn">Compact view</button></div>
+<div class="capture-list" id="captureList">
 @foreach (var c in Model.Captures)
 {
   <div class="card capture-row" data-key="@c.Capture.ArchiveUrl" data-ts="@c.Capture.Timestamp" data-url="@c.Capture.Original" data-ready="@(c.Ready ? "1" : "0")" data-frame="/Home/Frame?ts=@c.Capture.Timestamp&amp;url=@Uri.EscapeDataString(c.Capture.Original)">
@@ -133,8 +199,14 @@ else if (Model.CachedAt is not null)
   </div>
 }
 </div>
+</div>
+<aside class="inspector" id="inspector" aria-label="Capture details">
+  <div class="panel-title">Inspector</div>
+  <div id="inspBody" class="insp-empty">Select a capture to see its details and history.</div>
+</aside>
+</div>
 
-<div id="ss" class="ss" hidden tabindex="-1" aria-label="Capture slideshow">
+<div id="ss" class="ss" hidden>
   <div class="ssbar">
     <span id="ssInfo"></span>
     <label class="jump">Jump to <input id="ssJump" type="text" inputmode="numeric" placeholder="# or timestamp" aria-label="Capture number or timestamp" /></label>
@@ -170,6 +242,31 @@ else if (Model.CachedAt is not null)
 <script>
   const cards = [...document.querySelectorAll('.card')];
   const byId = id => document.getElementById(id);
+  (function () {
+    const list = byId('captureList'), btn = byId('densityBtn'), body = byId('inspBody');
+    const setDensity = c => { list.classList.toggle('compact', c); btn.textContent = c ? 'Card view' : 'Compact view'; localStorage.setItem('wb-density', c ? 'c' : 'n'); };
+    setDensity(localStorage.getItem('wb-density') === 'c');
+    btn.onclick = () => setDensity(!list.classList.contains('compact'));
+    const esc = s => String(s).replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]));
+    const fmt = ts => ts.slice(0, 4) + '-' + ts.slice(4, 6) + '-' + ts.slice(6, 8) + ' ' + ts.slice(8, 10) + ':' + ts.slice(10, 12);
+    let sel = null;
+    list.addEventListener('click', async e => {
+      if (e.target.closest('a,button')) return;
+      const card = e.target.closest('.card'); if (!card) return;
+      if (sel) sel.classList.remove('selected');
+      sel = card; card.classList.add('selected');
+      const q = new URLSearchParams(location.search);
+      body.className = '';
+      body.innerHTML = '<dl><dt>URL</dt><dd>' + esc(card.dataset.url) + '</dd><dt>Captured</dt><dd>' + fmt(card.dataset.ts) + '</dd>' +
+        '<dt>Saved locally</dt><dd>' + (card.dataset.ready === '1' ? 'Yes' : 'Not yet') + '</dd></dl><div class="panel-title">History</div><div id="inspHist">Loading...</div>';
+      try {
+        const r = await fetch('/Home/History?url=' + encodeURIComponent(q.get('url') || '') + '&filter=' + encodeURIComponent(q.get('filter') || '') + '&original=' + encodeURIComponent(card.dataset.url));
+        const h = await r.json();
+        if (sel !== card) return;
+        byId('inspHist').innerHTML = h.length ? '<ul class="hist">' + h.map(x => '<li class="' + (x.ts === card.dataset.ts ? 'cur' : '') + '">' + fmt(x.ts) + ' <em>' + esc(x.status) + '</em></li>').join('') + '</ul>' : 'No other captures.';
+      } catch { byId('inspHist').textContent = 'History unavailable.'; }
+    });
+  })();
   const paginationMode = '@Model.PaginationMode';
   const clientPageSize = @Model.PageSize;
   let clientPage = 1;
@@ -207,12 +304,12 @@ else if (Model.CachedAt is not null)
   const frames = new Map();                         // full view: slide index -> { el, loaded }
   const seen = new Set();                           // full view: capture keys that finished loading once
   const textPromises = new Map(), textValues = new Map();   // fast view: text cache
-  let mode = localStorage.getItem('wb-mode') === 'full' ? 'full' : 'fast';
+  let mode = localStorage.getItem('wb-mode') === 'fast' ? 'fast' : 'full';
   let list = [], idx = 0, spinnerTimer, loadTimer, boostTimer;
 
   const keyOf = card => card.dataset.ts + '|' + card.dataset.url;
 
-  function updateModeButton() { ssModeBtn.textContent = mode === 'fast' ? 'Full page (F)' : 'Fast text view (F)'; }
+  function updateModeButton() { ssModeBtn.textContent = mode === 'fast' ? 'IFrame archived page (F)' : 'Fast text view (F)'; }
   function setMode(m) {
     mode = m;
     localStorage.setItem('wb-mode', m);
@@ -279,6 +376,8 @@ else if (Model.CachedAt is not null)
     const el = document.createElement('iframe');
     el.className = 'ssframe';
     el.setAttribute('sandbox', 'allow-scripts allow-popups');
+    el.setAttribute('loading', 'eager');
+    el.setAttribute('referrerpolicy', 'no-referrer');
     el.hidden = true;
     f = { el, loaded: false };
     el.addEventListener('load', () => {
@@ -320,9 +419,13 @@ else if (Model.CachedAt is not null)
       }, SPINNER_DELAY_MS);
       loadTimer = setTimeout(() => {
         if (current.loaded) return;
+        // iframe view failed/too slow: automatically fall back to text so the user still sees content immediately.
+        mode = 'fast';
+        updateModeButton();
         ssLoading.hidden = true;
-        ssError.textContent = 'This capture is taking a long time to load. Continue with the arrows, press F for the fast text view, or open it in a new tab.';
+        ssError.textContent = 'IFrame view is slow or blocked for this capture. Switched to fast text view automatically.';
         ssError.hidden = false;
+        showFast(card);
       }, TIMEOUT_MS);
     }
     if (!byId('ssTextPanel').hidden) loadSlideText();
@@ -450,9 +553,10 @@ else if (Model.CachedAt is not null)
       const p = await r.json();
       if (p.total) {
         const speed = p.perSecond ? ' - ' + p.perSecond.toFixed(1) + ' pages/s' : '';
-        const left = p.running && p.perSecond ? ', about ' + eta((p.total - p.completed) / p.perSecond) + ' left' : '';
+        const left = p.running && p.etaSeconds ? ', about ' + eta(p.etaSeconds) + ' left' : '';
+        const detail = p.running ? ` [${p.inFlight} downloading, ${p.queued} queued, ${p.activeWorkers} workers, ${(p.jobs || []).filter(j => j.state === 1).length} active jobs]` : '';
         preloadStatus.textContent = (p.running ? 'Downloading and saving: ' : 'Saved: ') +
-          p.completed + ' / ' + p.total + (p.failed ? ' (' + p.failed + ' failed)' : '') + speed + left;
+          p.completed + ' / ' + p.total + (p.failed ? ' (' + p.failed + ' failed)' : '') + speed + left + detail;
       }
       if (p.running) setTimeout(pollPreloadStatus, 1000);
     } catch { setTimeout(pollPreloadStatus, 2000); }
@@ -487,10 +591,23 @@ else if (Model.CachedAt is not null)
     ).join('');
   }
 
-  async function exportText() {
+  async function fetchCaptureSet() {
+    const q = new URLSearchParams(location.search);
+    const url = q.get('url') || searchBar?.querySelector('[name=url]')?.value || '';
+    if (!url) return [];
+    const params = new URLSearchParams();
+    params.set('url', url);
+    params.set('filter', q.get('filter') || searchBar?.querySelector('[name=filter]')?.value || 'html200');
+    params.set('searchMode', q.get('searchMode') || searchBar?.querySelector('[name=searchMode]')?.value || 'url');
+    ['year','category','status','section','q'].forEach(k => { const v = q.get(k); if (v) params.set(k, v); });
+    const r = await fetch('/Home/CaptureSet?' + params.toString());
+    if (!r.ok) throw new Error('Could not load full filtered capture set');
+    return await r.json();
+  }
+
+  async function exportText(items = cards) {
     const st = byId('expStatus');
     if (exporting) { cancelExport = true; return; }
-    const items = cards;
     if (!items.length) { alert('No captures available.'); return; }
     const fmt = byId('expFmt').value;
     exporting = true; cancelExport = false;
@@ -500,10 +617,18 @@ else if (Model.CachedAt is not null)
       while (!cancelExport && nextItem < items.length) {
         const i = nextItem++;
         const c = items[i];
+        const ts = c.dataset?.ts || c.ts;
+        const url = c.dataset?.url || c.url;
+        const archive = c.dataset?.key || c.archiveUrl || ('https://web.archive.org/web/' + ts + '/' + url);
         let t, error = '';
-        try { t = await fetchText(c); error = t.error || ''; }
+        try {
+          const r = await fetch('/Home/Text?ts=' + ts + '&url=' + encodeURIComponent(url));
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          t = await r.json();
+          error = t.error || '';
+        }
         catch (e) { t = { title: null, description: null, text: '' }; error = e.message || 'Text extraction failed'; }
-        out.push({ i, url: c.dataset.url, archive: c.dataset.key, ts: c.dataset.ts,
+        out.push({ i, url, archive, ts,
                    title: t.title, description: t.description, text: t.text, error });
         const failed = out.filter(o => o.error).length;
         st.textContent = 'Exporting ' + out.length + ' / ' + items.length + (failed ? ' (' + failed + ' failed)' : '') + ' - click again to stop';
@@ -523,16 +648,47 @@ else if (Model.CachedAt is not null)
     exporting = false;
   }
   const expAll = byId('expAll');
-  if (expAll) expAll.onclick = exportText;
+  if (expAll) expAll.onclick = () => exportText(cards);
+  const expAllFiltered = byId('expAllFiltered');
+  if (expAllFiltered) expAllFiltered.onclick = async () => {
+    try {
+      const all = await fetchCaptureSet();
+      await exportText(all);
+    } catch (e) {
+      byId('expStatus').textContent = (e && e.message) ? e.message : 'Could not export full filtered set.';
+    }
+  };
 
   // ---------------------------------------------------------------- durable background activity
   const operationStates = ['Queued', 'Running', 'Paused', 'Stopping', 'Stopped', 'Interrupted', 'Completed', 'Failed'];
+  const operationKinds = ['CaptureLoad', 'WaybackRefresh', 'PagePreload'];
   const activityImmediate = byId('activityImmediate');
-  const operationList = byId('operationList');
+  const workflowTimeline = byId('workflowTimeline');
+  const captureBar = byId('captureBar');
+  const preloadBar = byId('preloadBar');
+  const captureText = byId('captureText');
+  const preloadText = byId('preloadText');
   const searchBar = byId('searchBar');
   let pendingSearch = null;
   const stateText = state => operationStates[state] || 'Unknown';
+  const kindText = kind => operationKinds[kind] || 'Unknown';
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+  function currentQuery() {
+    if (pendingSearch && pendingSearch.prefix) return { url: pendingSearch.prefix, filter: pendingSearch.filter, active: true };
+    return {
+      url: searchBar?.querySelector('[name=url]')?.value || '',
+      filter: searchBar?.querySelector('[name=filter]')?.value || 'html200',
+      active: false
+    };
+  }
+
+  function renderBar(bar, text, wf) {
+    if (!bar || !text || !wf) return;
+    bar.style.width = Math.max(0, Math.min(100, wf.percent || 0)) + '%';
+    text.textContent = `${wf.state}${wf.total ? ` (${wf.completed}/${wf.total})` : ''}${wf.error ? ` - ${wf.error}` : ''}`;
+    bar.className = wf.error ? 'wf-err' : (wf.active ? 'wf-on' : 'wf-done');
+  }
 
   if (searchBar) searchBar.addEventListener('submit', async e => {
     e.preventDefault();
@@ -546,12 +702,20 @@ else if (Model.CachedAt is not null)
       const response = await fetch('/Home/StartSearch', { method: 'POST', body: data });
       if (!response.ok) throw new Error(await response.text());
        pendingSearch = await response.json();
+       const target = '/?url=' + encodeURIComponent(pendingSearch.prefix) +
+         '&filter=' + encodeURIComponent(pendingSearch.filter) +
+         '&pagination=' + encodeURIComponent(pendingSearch.pagination || 'server') +
+         '&pageSize=' + encodeURIComponent(pendingSearch.pageSize || 50);
        if (pendingSearch.cached) {
-         activityImmediate.textContent = 'Capture list already loaded; using the saved list.';
-         buttons.forEach(button => button.disabled = false);
-       } else {
-         pollOperations();
+         activityImmediate.textContent = 'Capture list already loaded; opening saved results...';
+         location.href = target;
+         return;
        }
+
+       pendingSearch.requestedAt = Date.now();
+       activityImmediate.textContent = 'Capture load started in background...';
+       buttons.forEach(button => button.disabled = false);
+       pollWorkflow();
     } catch (error) {
       activityImmediate.textContent = 'Search could not be started: ' + (error.message || 'unknown error');
       buttons.forEach(button => button.disabled = false);
@@ -567,59 +731,88 @@ else if (Model.CachedAt is not null)
         : '?url=' + encodeURIComponent(searchBar.querySelector('[name=url]').value) +
           '&filter=' + encodeURIComponent(searchBar.querySelector('[name=filter]').value);
       await fetch('/Home/' + name + query, { method: 'POST' });
-      await pollOperations();
+      await pollWorkflow();
     } catch { activityImmediate.textContent = 'Could not change background activity.'; }
   }
+
   function selectedOperationIds() {
-    return [...operationList.querySelectorAll('.operation-select:checked')].map(x => x.value);
+    return [...workflowTimeline.querySelectorAll('.operation-select:checked')].map(x => x.value);
   }
+
   async function commandSelected(name) {
     const ids = selectedOperationIds();
-    if (!ids.length) { activityImmediate.textContent = 'Select one or more activities first.'; return; }
+    if (!ids.length) {
+      // fallback to current query workflow only
+      await operationCommand(name);
+      return;
+    }
     for (const id of ids) await operationCommand(name, id);
   }
+
   byId('pauseWork').onclick = () => commandSelected('Pause');
   byId('resumeWork').onclick = () => commandSelected('Resume');
   byId('stopWork').onclick = () => commandSelected('Stop');
 
-  operationList.addEventListener('click', e => {
+  workflowTimeline.addEventListener('click', e => {
     const button = e.target.closest('[data-operation-command]');
     if (!button) return;
     operationCommand(button.dataset.operationCommand, button.dataset.operationId);
   });
 
-  async function pollOperations() {
+  function renderOperationTimeline(operations) {
+    if (!workflowTimeline) return;
+    const visible = (operations || []).slice(0, 24);
+    workflowTimeline.innerHTML = visible.length
+      ? visible.map(o => {
+          const progress = o.total ? ` (${o.completed}/${o.total})` : '';
+          const error = o.error ? ` <span class="operation-error">${esc(o.error)}</span>` : '';
+          const active = [0, 1, 2, 3, 5].includes(o.state);
+          const controls = active
+            ? `<label><input type="checkbox" class="operation-select" value="${o.id}" aria-label="Select ${esc(kindText(o.kind))} for ${esc(o.prefix)}"></label>
+               <button type="button" data-operation-command="Pause" data-operation-id="${o.id}">Pause</button>
+               <button type="button" data-operation-command="Resume" data-operation-id="${o.id}">Resume</button>
+               <button type="button" data-operation-command="Stop" data-operation-id="${o.id}">Stop</button>`
+            : '';
+          return `<div class="operation"><span>${controls}</span><strong>${esc(kindText(o.kind))}: ${esc(o.prefix)}</strong><span>${esc(stateText(o.state))}${progress}</span>${error}</div>`;
+        }).join('')
+      : 'No workflow events yet.';
+  }
+
+  async function pollWorkflow() {
     try {
-      const response = await fetch('/Home/OperationStatus');
-      if (!response.ok) return;
-      const operations = await response.json();
+      const q = currentQuery();
+      if (!q.url) return;
+      const [wfResponse, opResponse] = await Promise.all([
+        fetch('/Home/WorkflowStatus?url=' + encodeURIComponent(q.url) + '&filter=' + encodeURIComponent(q.filter)),
+        fetch('/Home/OperationStatus')
+      ]);
+      if (!wfResponse.ok) return;
+      const wf = await wfResponse.json();
+      const operations = opResponse.ok ? await opResponse.json() : [];
+
+      renderBar(captureBar, captureText, wf.captureLoad);
+      renderBar(preloadBar, preloadText, wf.preload);
+      renderOperationTimeline(operations);
+
       if (pendingSearch) {
-        const current = operations.find(o => o.id === pendingSearch.operationId);
-        if (current && [6, 7].includes(current.state)) {
-          const target = '/?url=' + encodeURIComponent(pendingSearch.prefix) + '&filter=' + encodeURIComponent(pendingSearch.filter);
+        const captureState = String(wf.captureLoad?.state || '');
+        if (captureState === 'Completed' || captureState === 'Failed') {
+          const target = '/?url=' + encodeURIComponent(pendingSearch.prefix) + '&filter=' + encodeURIComponent(pendingSearch.filter) + '&pagination=' + encodeURIComponent(pendingSearch.pagination || 'server') + '&pageSize=' + encodeURIComponent(pendingSearch.pageSize || 50);
           pendingSearch = null;
           location.href = target;
           return;
         }
       }
-      const active = operations.filter(o => [0, 1, 2, 3, 5].includes(o.state));
-      operationList.innerHTML = operations.length ? operations.slice(0, 12).map(o => {
-        const progress = o.total ? ` - ${o.completed} / ${o.total}` : '';
-        const error = o.error ? ` <span class="operation-error">${esc(o.error)}</span>` : '';
-        const controls = [0, 1, 2, 3, 5].includes(o.state)
-          ? `<label><input type="checkbox" class="operation-select" value="${o.id}" aria-label="Select ${esc(o.kind)} for ${esc(o.prefix)}"></label>
-             <button type="button" data-operation-command="Pause" data-operation-id="${o.id}">Pause</button>
-             <button type="button" data-operation-command="Resume" data-operation-id="${o.id}">Resume</button>
-             <button type="button" data-operation-command="Stop" data-operation-id="${o.id}">Stop</button>` : '';
-        return `<div class="operation"><span>${controls}</span> <strong>${esc(o.kind)}: ${esc(o.prefix)}</strong> <span>${stateText(o.state)}${progress}</span>${error}</div>`;
-      }).join('') : 'No background operations yet.';
-      if (active.length) {
-        activityImmediate.textContent = active.length + ' operation' + (active.length === 1 ? '' : 's') + ' active';
-        setTimeout(pollOperations, 1000);
-      } else if (operations.length) {
-        activityImmediate.textContent = 'Background work is idle';
+
+      if (pendingSearch && Date.now() - (pendingSearch.requestedAt || 0) < 8000 && wf.message === 'No workflow yet') {
+        activityImmediate.textContent = 'Starting capture load...';
+      } else {
+        activityImmediate.textContent = wf.message || 'Background work is idle';
       }
-    } catch { setTimeout(pollOperations, 2000); }
+
+      const active = wf.captureLoad?.active || wf.preload?.active || (operations || []).some(o => [0,1,2,3,5].includes(o.state)) || (pendingSearch && Date.now() - (pendingSearch.requestedAt || 0) < 8000) || q.active;
+      if (active) setTimeout(pollWorkflow, 1000);
+    } catch { setTimeout(pollWorkflow, 2000); }
   }
-  pollOperations();
+  pollWorkflow();
 </script>

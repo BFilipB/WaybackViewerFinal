@@ -26,6 +26,110 @@ public sealed class FakeTimeSource : ITimeSource
 
     public void Advance(TimeSpan span) { lock (gate) now += span; }
     public double TotalDelayMs { get { lock (gate) return Delays.Sum(d => d.TotalMilliseconds); } }
+
+}
+
+public sealed class SlowOperationStore : IArchiveStore
+{
+    private readonly InMemoryArchiveStore inner = new();
+    private readonly object gate = new();
+    private long nextOperationId = 1;
+    private readonly Dictionary<long, BackgroundOperation> operations = new();
+    private readonly Dictionary<string, long> operationKeys = new(StringComparer.Ordinal);
+    public int UpdateCalls { get; private set; }
+
+    public Task InitializeAsync(CancellationToken ct = default) => inner.InitializeAsync(ct);
+    public Task<SearchSnapshot?> GetSearchAsync(string prefix, string filter, CancellationToken ct = default) => inner.GetSearchAsync(prefix, filter, ct);
+    public Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit, CancellationToken ct = default) => inner.GetSearchPageAsync(prefix, filter, offset, limit, ct);
+    public Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> captures, DateTimeOffset cachedAt, CancellationToken ct = default) => inner.SaveSearchAsync(prefix, filter, captures, cachedAt, ct);
+    public Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default) => inner.GetPageAsync(timestamp, original, includeHtml, ct);
+    public Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default) => inner.SavePagesAsync(pages, ct);
+    public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind, CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            var key = OpKey(prefix, filter, kind);
+            if (!operationKeys.TryGetValue(key, out var id) || !operations.TryGetValue(id, out var op) || !op.IsActive) return Task.FromResult<BackgroundOperation?>(null);
+            return Task.FromResult<BackgroundOperation?>(op);
+        }
+    }
+
+    public Task<BackgroundOperation> CreateOrGetOperationAsync(string prefix, string filter, OperationKind kind, DateTimeOffset now, CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            var key = OpKey(prefix, filter, kind);
+            if (operationKeys.TryGetValue(key, out var existingId) && operations.TryGetValue(existingId, out var existing) && existing.IsActive)
+                return Task.FromResult(existing);
+            var op = new BackgroundOperation(nextOperationId++, prefix, filter, kind, OperationState.Queued, now, now, 0, 0, 0);
+            operationKeys[key] = op.Id;
+            operations[op.Id] = op;
+            return Task.FromResult(op);
+        }
+    }
+
+    public Task<BackgroundOperation?> GetOperationAsync(long id, CancellationToken ct = default)
+    {
+        lock (gate) return Task.FromResult(operations.TryGetValue(id, out var op) ? op : null);
+    }
+
+    public Task<IReadOnlyList<BackgroundOperation>> GetOperationsAsync(bool activeOnly = false, CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            IReadOnlyList<BackgroundOperation> list = operations.Values
+                .Where(o => !activeOnly || o.IsActive)
+                .OrderByDescending(o => o.UpdatedAt)
+                .ToArray();
+            return Task.FromResult(list);
+        }
+    }
+
+    public async Task UpdateOperationAsync(BackgroundOperation operation, CancellationToken ct = default)
+    {
+        // state-dependent delay: catches out-of-order fire-and-forget updates.
+        var delay = operation.State switch
+        {
+            OperationState.Paused => 120,
+            OperationState.Running => 30,
+            _ => 0
+        };
+        if (delay > 0) await Task.Delay(delay, ct);
+        lock (gate)
+        {
+            UpdateCalls++;
+            operations[operation.Id] = operation;
+            operationKeys[OpKey(operation.Prefix, operation.Filter, operation.Kind)] = operation.Id;
+        }
+    }
+
+    private static string OpKey(string prefix, string filter, OperationKind kind) => $"{prefix}|{filter}|{(int)kind}";
+}
+
+public sealed class DelayedSaveStore : IArchiveStore
+{
+    private readonly InMemoryArchiveStore inner = new();
+    public TaskCompletionSource SaveStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource SaveGate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task InitializeAsync(CancellationToken ct = default) => inner.InitializeAsync(ct);
+    public Task<SearchSnapshot?> GetSearchAsync(string prefix, string filter, CancellationToken ct = default) => inner.GetSearchAsync(prefix, filter, ct);
+    public Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit, CancellationToken ct = default) => inner.GetSearchPageAsync(prefix, filter, offset, limit, ct);
+    public Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> captures, DateTimeOffset cachedAt, CancellationToken ct = default) => inner.SaveSearchAsync(prefix, filter, captures, cachedAt, ct);
+    public Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default) => inner.GetPageAsync(timestamp, original, includeHtml, ct);
+
+    public async Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default)
+    {
+        SaveStarted.TrySetResult();
+        await SaveGate.Task.WaitAsync(ct);
+        await inner.SavePagesAsync(pages, ct);
+    }
+
+    public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind, CancellationToken ct = default) => inner.FindActiveOperationAsync(prefix, filter, kind, ct);
+    public Task<BackgroundOperation> CreateOrGetOperationAsync(string prefix, string filter, OperationKind kind, DateTimeOffset now, CancellationToken ct = default) => inner.CreateOrGetOperationAsync(prefix, filter, kind, now, ct);
+    public Task<BackgroundOperation?> GetOperationAsync(long id, CancellationToken ct = default) => inner.GetOperationAsync(id, ct);
+    public Task<IReadOnlyList<BackgroundOperation>> GetOperationsAsync(bool activeOnly = false, CancellationToken ct = default) => inner.GetOperationsAsync(activeOnly, ct);
+    public Task UpdateOperationAsync(BackgroundOperation operation, CancellationToken ct = default) => inner.UpdateOperationAsync(operation, ct);
 }
 
 /// HttpMessageHandler that replays queued responses (or throws) and counts calls.

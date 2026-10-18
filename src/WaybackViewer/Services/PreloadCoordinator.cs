@@ -27,14 +27,21 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
     private readonly ILogger<PreloadCoordinator> log;
 
     private readonly object gate = new();
-    private readonly LinkedList<PendingCapture> pending = new();
+    private readonly Dictionary<string, LinkedList<PendingCapture>> queues = new(StringComparer.Ordinal);
+    private readonly List<string> ring = new();
+    private int ringCursor;
     private readonly Dictionary<string, LinkedListNode<PendingCapture>> pendingIndex = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> inFlight = new(StringComparer.Ordinal);
     private readonly Channel<(NewPage Page, string JobKey)> saveQueue = Channel.CreateBounded<(NewPage, string)>(
         new BoundedChannelOptions(500) { SingleReader = true, FullMode = BoundedChannelFullMode.Wait });
     private readonly CancellationTokenSource cts = new();
+    private readonly List<Task> workerTasks = new();
 
     private int total, completed, failed, activeWorkers, unsaved;
+    private string? lastJobKey;
+    private Task? opWriter;
+    private readonly Channel<BackgroundOperation> opQueue = Channel.CreateUnbounded<BackgroundOperation>(
+        new UnboundedChannelOptions { SingleReader = true });
     private long batchStartTicks, batchEndTicks;
     private bool disposed;
     private Task? writer;
@@ -57,6 +64,13 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
 
     public int Enqueue(IEnumerable<StoredCapture> captures, string? prefix, string? filter)
     {
+        using var scope = log.BeginScope(new Dictionary<string, object?>
+        {
+            ["component"] = "preload",
+            ["prefix"] = prefix,
+            ["filter"] = filter
+        });
+
         var items = captures.ToList();
         var htmlItems = items.Where(item => item.Capture.IsHtml).ToList();
         var readyItems = htmlItems.Count(item => item.Ready);
@@ -95,7 +109,7 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             {
                 var key = item.Capture.Key;
                 if (pendingIndex.ContainsKey(key) || inFlight.ContainsKey(key)) continue;
-                pendingIndex[key] = pending.AddLast(new PendingCapture(item.Capture, jobKey));
+                AddPendingLocked(new PendingCapture(item.Capture, jobKey));
                 added++;
             }
 
@@ -126,11 +140,7 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             }
 
             writer ??= Task.Run(WriteLoopAsync);
-            while (activeWorkers < options.Workers && activeWorkers < pending.Count)
-            {
-                activeWorkers++;
-                _ = Task.Run(WorkerLoopAsync);
-            }
+            EnsureWorkersLocked();
 
             return added;
         }
@@ -138,6 +148,13 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
 
     public void Pause(string? prefix = null, string? filter = null)
     {
+        using var scope = log.BeginScope(new Dictionary<string, object?>
+        {
+            ["component"] = "preload",
+            ["action"] = "pause",
+            ["prefix"] = prefix,
+            ["filter"] = filter
+        });
         lock (gate)
         {
             foreach (var job in MatchingJobsLocked(prefix, filter))
@@ -151,6 +168,13 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
 
     public void Resume(string? prefix = null, string? filter = null)
     {
+        using var scope = log.BeginScope(new Dictionary<string, object?>
+        {
+            ["component"] = "preload",
+            ["action"] = "resume",
+            ["prefix"] = prefix,
+            ["filter"] = filter
+        });
         lock (gate)
         {
             foreach (var job in MatchingJobsLocked(prefix, filter))
@@ -161,22 +185,26 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             }
             resumeSignal.TrySetResult();
             resumeSignal = NewSignal(false);
+            EnsureWorkersLocked();
         }
     }
 
     public void Stop(string? prefix = null, string? filter = null)
     {
+        using var scope = log.BeginScope(new Dictionary<string, object?>
+        {
+            ["component"] = "preload",
+            ["action"] = "stop",
+            ["prefix"] = prefix,
+            ["filter"] = filter
+        });
         lock (gate)
         {
             foreach (var job in MatchingJobsLocked(prefix, filter))
             {
                 job.Stopping = true;
                 job.Paused = false;
-                foreach (var item in pending.Where(item => item.JobKey == job.Operation.Key).ToList())
-                {
-                    if (!pendingIndex.Remove(item.Capture.Key, out var node)) continue;
-                    pending.Remove(node);
-                }
+                ClearJobQueueLocked(job.Operation.Key);
                 UpdateOperationLocked(job, OperationState.Stopped);
             }
             resumeSignal.TrySetResult();
@@ -196,11 +224,7 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             if (job is null) return;
             job.Stopping = true;
             job.Paused = false;
-            foreach (var item in pending.Where(item => item.JobKey == job.Operation.Key).ToList())
-            {
-                if (!pendingIndex.Remove(item.Capture.Key, out var node)) continue;
-                pending.Remove(node);
-            }
+            ClearJobQueueLocked(job.Operation.Key);
             UpdateOperationLocked(job, OperationState.Stopped);
             resumeSignal.TrySetResult();
             CheckIdleLocked();
@@ -221,15 +245,33 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
         }
     }
 
-    public Task StopAsync(CancellationToken cancellationToken)
+    public async Task StopAsync(CancellationToken cancellationToken)
     {
+        Task[] workers;
+        Task? saveWriter;
         lock (gate)
         {
+            disposed = true;
             if (IsBusyLocked())
                 foreach (var job in jobs.Values.Where(job => !job.Stopping))
                     UpdateOperationLocked(job, OperationState.Interrupted);
+            resumeSignal.TrySetResult();
+            workers = workerTasks.Where(t => !t.IsCompleted).ToArray();
+            saveWriter = writer;
         }
-        return Task.CompletedTask;
+
+        // 1) wait for current download workers to stop producing new pages
+        await WaitWithTimeoutAsync(Task.WhenAll(workers), TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+
+        // 2) complete save queue and let single writer flush all already-downloaded pages
+        saveQueue.Writer.TryComplete();
+        if (saveWriter is not null)
+            await WaitWithTimeoutAsync(saveWriter, TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+
+        // 3) flush operation-state writes in order
+        opQueue.Writer.TryComplete();
+        if (opWriter is not null)
+            await WaitWithTimeoutAsync(opWriter, TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
     }
     /// Moves the given captures (keys "timestamp|url") to the front of the queue, keeping their order.
     public void Boost(IEnumerable<string> keys)
@@ -240,8 +282,9 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             for (var i = list.Count - 1; i >= 0; i--)
             {
                 if (!pendingIndex.TryGetValue(list[i], out var node)) continue;
-                pending.Remove(node);
-                pending.AddFirst(node);
+                var owner = node.List!;
+                owner.Remove(node);
+                owner.AddFirst(node);
             }
         }
     }
@@ -251,8 +294,8 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
     {
         lock (gate)
         {
-            if (!pendingIndex.Remove(key, out var node)) return;
-            pending.Remove(node);
+            if (!pendingIndex.TryGetValue(key, out var node)) return;
+            RemovePendingLocked(node);
             total--;
             CheckIdleLocked();
         }
@@ -270,7 +313,14 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
                 var seconds = Stopwatch.GetElapsedTime(batchStartTicks, end).TotalSeconds;
                 if (seconds > 0.25) perSecond = Math.Round(completed / seconds, 2);
             }
-            return new PreloadStatus(total, completed, failed, running, perSecond);
+            double? eta = running && perSecond > 0 ? Math.Round(Math.Max(0, total - completed - failed) / perSecond) : null;
+            var queuedByJob = queues.ToDictionary(q => q.Key, q => q.Value.Count);
+            var inFlightByJob = inFlight.Values.GroupBy(v => v).ToDictionary(g => g.Key, g => g.Count());
+            var jobList = jobs.Values.Select(j => new JobProgress(j.Operation.Prefix, j.Operation.Filter,
+                j.Operation.State, queuedByJob.GetValueOrDefault(j.Operation.Key), inFlightByJob.GetValueOrDefault(j.Operation.Key),
+                j.Operation.Completed, j.Operation.Total)).ToList();
+            return new PreloadStatus(total, completed, failed, running, perSecond, pendingIndex.Count, inFlight.Count,
+                activeWorkers, eta, jobList);
         }
     }
 
@@ -299,17 +349,15 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             string jobKey;
             lock (gate)
             {
-                if (disposed || pending.First is null)
+                var item = disposed ? null : TakeNextLocked();
+                if (item is null)
                 {
                     activeWorkers--;
                     CheckIdleLocked();
                     return;
                 }
-                var item = pending.First.Value;
                 capture = item.Capture;
                 jobKey = item.JobKey;
-                pending.RemoveFirst();
-                pendingIndex.Remove(capture.Key);
                 inFlight[capture.Key] = jobKey;
             }
 
@@ -343,6 +391,7 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             }
             catch (Exception)
             {
+                if (disposed) return;
                 lock (gate) unsaved--;
                 MarkFailed(capture.Key, jobKey);
             }
@@ -353,24 +402,36 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
     {
         var reader = saveQueue.Reader;
         var batch = new List<(NewPage Page, string JobKey)>(options.WriteBatchSize);
+        var maxDelay = TimeSpan.FromMilliseconds(options.WriteMaxDelayMs);
         try
         {
             while (await reader.WaitToReadAsync(cts.Token).ConfigureAwait(false))
             {
                 batch.Clear();
-                var deadline = DateTime.UtcNow.AddMilliseconds(options.WriteMaxDelayMs);
+                var started = Stopwatch.GetTimestamp();
 
                 while (batch.Count < options.WriteBatchSize)
                 {
-                    if (reader.TryRead(out var item)) { batch.Add(item); continue; }
+                    if (reader.TryRead(out var item))
+                    {
+                        batch.Add(item);
+                        continue;
+                    }
 
-                    var remaining = deadline - DateTime.UtcNow;
-                    if (batch.Count == 0 || remaining <= TimeSpan.Zero) break;
+                    if (batch.Count == 0) break;
+                    var elapsed = Stopwatch.GetElapsedTime(started, Stopwatch.GetTimestamp());
+                    var remaining = maxDelay - elapsed;
+                    if (remaining <= TimeSpan.Zero) break;
 
-                    using var wait = CancellationTokenSource.CreateLinkedTokenSource(cts.Token);
-                    wait.CancelAfter(remaining);
-                    try { if (!await reader.WaitToReadAsync(wait.Token).ConfigureAwait(false)) break; }
-                    catch (OperationCanceledException) when (!cts.IsCancellationRequested) { break; }
+                    try
+                    {
+                        if (!await reader.WaitToReadAsync(cts.Token).AsTask().WaitAsync(remaining, cts.Token).ConfigureAwait(false))
+                            break;
+                    }
+                    catch (TimeoutException)
+                    {
+                        break;
+                    }
                 }
 
                 if (batch.Count > 0) await FlushAsync(batch.ToArray()).ConfigureAwait(false);
@@ -384,10 +445,13 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
 
     private async Task FlushAsync((NewPage Page, string JobKey)[] batch)
     {
+        var pages = new NewPage[batch.Length];
+        for (var i = 0; i < batch.Length; i++) pages[i] = batch[i].Page;
+
         var ok = true;
         try
         {
-            await store.SavePagesAsync(batch.Select(item => item.Page).ToArray(), CancellationToken.None).ConfigureAwait(false);
+            await store.SavePagesAsync(pages, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -397,16 +461,25 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
 
         lock (gate)
         {
-            foreach (var item in batch) inFlight.Remove(item.Page.Capture.Key);
+            var jobCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+            foreach (var item in batch)
+            {
+                inFlight.Remove(item.Page.Capture.Key);
+                if (jobCounts.TryGetValue(item.JobKey, out var count)) jobCounts[item.JobKey] = count + 1;
+                else jobCounts[item.JobKey] = 1;
+            }
+
             completed += batch.Length;
             if (!ok) failed += batch.Length;
             unsaved -= batch.Length;
-            foreach (var group in batch.GroupBy(item => item.JobKey, StringComparer.Ordinal))
+
+            foreach (var kv in jobCounts)
             {
-                if (!jobs.TryGetValue(group.Key, out var job)) continue;
-                if (ok) UpdateOperationLocked(job, OperationState.Running, group.Count(), 0);
-                else UpdateOperationLocked(job, OperationState.Running, 0, group.Count());
+                if (!jobs.TryGetValue(kv.Key, out var job)) continue;
+                if (ok) UpdateOperationLocked(job, OperationState.Running, kv.Value, 0);
+                else UpdateOperationLocked(job, OperationState.Running, 0, kv.Value);
             }
+
             CheckIdleLocked();
         }
     }
@@ -423,7 +496,7 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
         }
     }
 
-    private bool IsBusyLocked() => pending.Count > 0 || inFlight.Count > 0 || unsaved > 0;
+    private bool IsBusyLocked() => pendingIndex.Count > 0 || inFlight.Count > 0 || unsaved > 0;
 
     private void CheckIdleLocked()
     {
@@ -482,11 +555,112 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             {
                 resumeSignal.TrySetResult();
                 resumeSignal = NewSignal(false);
+                EnsureWorkersLocked();
             }
         }
     }
 
-    private void PersistOperation(BackgroundOperation value) => _ = store.UpdateOperationAsync(value);
+    private void EnsureWorkersLocked()
+    {
+        while (activeWorkers < options.Workers && activeWorkers < pendingIndex.Count)
+        {
+            activeWorkers++;
+            var task = Task.Run(WorkerLoopAsync);
+            workerTasks.Add(task);
+            _ = task.ContinueWith(_t =>
+            {
+                lock (gate) workerTasks.Remove(_t);
+            }, TaskScheduler.Default);
+        }
+    }
+
+    private static async Task WaitWithTimeoutAsync(Task task, TimeSpan timeout, CancellationToken ct)
+    {
+        try
+        {
+            await task.WaitAsync(timeout, ct).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // shutdown timeout/cancellation: remaining work is resumed on next start
+        }
+    }
+
+    /// Round-robin across the per-job queues; queues of paused jobs are skipped so they never hold a worker.
+    /// Cost is O(number of jobs), not O(queued pages).
+    private PendingCapture? TakeNextLocked()
+    {
+        for (var i = 0; i < ring.Count; i++)
+        {
+            var pos = (ringCursor + i) % ring.Count;
+            var key = ring[pos];
+            if (jobs.TryGetValue(key, out var job) && job.Paused) continue;
+
+            var node = queues[key].First!;
+            var item = node.Value;
+            ringCursor = pos + 1;
+            RemovePendingLocked(node);
+            if (ring.Count == 0 || ringCursor >= ring.Count) ringCursor = 0;
+            lastJobKey = key;
+            return item;
+        }
+        return null;
+    }
+
+    private void AddPendingLocked(PendingCapture item)
+    {
+        if (!queues.TryGetValue(item.JobKey, out var queue))
+        {
+            queues[item.JobKey] = queue = new LinkedList<PendingCapture>();
+            ring.Add(item.JobKey);
+        }
+        pendingIndex[item.Capture.Key] = queue.AddLast(item);
+    }
+
+    private void RemovePendingLocked(LinkedListNode<PendingCapture> node)
+    {
+        var queue = node.List!;
+        var jobKey = node.Value.JobKey;
+        queue.Remove(node);
+        pendingIndex.Remove(node.Value.Capture.Key);
+        if (queue.Count > 0) return;
+
+        queues.Remove(jobKey);
+        var index = ring.IndexOf(jobKey);
+        if (index < 0) return;
+        ring.RemoveAt(index);
+        if (index < ringCursor) ringCursor--;
+    }
+
+    private void ClearJobQueueLocked(string jobKey)
+    {
+        if (!queues.TryGetValue(jobKey, out var queue)) return;
+        var nodes = new List<LinkedListNode<PendingCapture>>(queue.Count);
+        for (var node = queue.First; node is not null; node = node.Next) nodes.Add(node);
+        foreach (var node in nodes) RemovePendingLocked(node);
+    }
+
+    private void PersistOperation(BackgroundOperation value)
+    {
+        opWriter ??= Task.Run(OperationWriteLoopAsync);
+        opQueue.Writer.TryWrite(value);
+    }
+
+    private async Task OperationWriteLoopAsync()
+    {
+        var reader = opQueue.Reader;
+        while (await reader.WaitToReadAsync().ConfigureAwait(false))
+        {
+            // only the newest state of each operation matters: coalesce what is queued
+            var latest = new Dictionary<long, BackgroundOperation>();
+            while (reader.TryRead(out var op)) latest[op.Id] = op;
+            foreach (var op in latest.Values)
+            {
+                try { await store.UpdateOperationAsync(op, CancellationToken.None).ConfigureAwait(false); }
+                catch (Exception ex) { log.LogWarning(ex, "Saving operation {Id} failed", op.Id); }
+            }
+        }
+    }
 
     private static TaskCompletionSource NewIdle(bool completedAlready)
     {

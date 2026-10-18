@@ -46,6 +46,34 @@ public sealed class AppHost : IAsyncDisposable
         };
     }
 
+public class RateLimitAndOperationsEndpointTests
+{
+    [Fact]
+    public async Task Operation_status_endpoint_returns_json_array()
+    {
+        await using var host = await AppHost.StartAsync();
+        var body = await host.GetAsync("/Home/OperationStatus");
+        using var doc = JsonDocument.Parse(body);
+        Assert.Equal(JsonValueKind.Array, doc.RootElement.ValueKind);
+    }
+
+    [Fact]
+    public async Task Rate_limit_can_reject_when_configured_low()
+    {
+        await using var host = await AppHost.StartAsync(new Dictionary<string, string?>
+        {
+            ["RateLimit:PermitLimit"] = "1",
+            ["RateLimit:WindowSeconds"] = "60"
+        });
+
+        var first = await host.Client.GetAsync("/healthz");
+        var second = await host.Client.GetAsync("/healthz");
+
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        Assert.Equal((HttpStatusCode)429, second.StatusCode);
+    }
+}
+
     public void RouteSite(string prefix, IReadOnlyList<Capture> captures, string filter = "html200")
     {
         Archive.Route(ArchiveUrls.Cdx(prefix, filter), SampleData.CdxJson(captures));

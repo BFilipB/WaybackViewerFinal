@@ -235,6 +235,38 @@ public class InMemoryArchiveStoreTests
         Assert.Equal(15, StoreScenarios.Names.Length);
 }
 
+public class ArchiveStoreContractTests
+{
+    [Fact]
+    public async Task Core_operation_scenarios_work_in_memory_and_sqlite()
+    {
+        var operations = new Func<IArchiveStore, Task>[]
+        {
+            StoreScenarios.InitializeIsIdempotent,
+            StoreScenarios.UnknownSearchIsNull,
+            StoreScenarios.SearchRoundTripsNewestFirst,
+            StoreScenarios.PagedSearchRetrieval,
+            StoreScenarios.ConcurrentSavesDoNotCollide
+        };
+
+        foreach (var operation in operations)
+            await operation(new InMemoryArchiveStore());
+
+        var dir = Path.Combine(Path.GetTempPath(), "wb-contract-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var sqlite = new SqliteArchiveStore($"Data Source={Path.Combine(dir, "contract.db")}");
+            foreach (var operation in operations)
+                await operation(sqlite);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            try { Directory.Delete(dir, true); } catch { }
+        }
+    }
+}
+
 public class SqliteArchiveStoreTests : IDisposable
 {
     private readonly string dir = Path.Combine(Path.GetTempPath(), "wb-sqlite-" + Guid.NewGuid().ToString("N"));

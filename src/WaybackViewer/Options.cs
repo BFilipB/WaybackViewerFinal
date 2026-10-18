@@ -25,4 +25,6 @@ public sealed class StorageOptions
     public string Provider { get; set; } = "Sqlite";
     /// A saved capture list older than this is re-fetched. 0 = never expires.
     public int SearchMaxAgeDays { get; set; } = 30;
+    /// Optional root folder for archived compressed HTML payloads. When empty, a provider-specific default is used.
+    public string? HtmlRoot { get; set; }
 }

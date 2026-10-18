@@ -36,7 +36,11 @@ public sealed record StoredPage(Capture Capture, byte[]? HtmlGz, ParsedPage Pars
 
 public sealed record PageText(string? Title, string? Description, string Text, string? Error = null);
 
-public sealed record PreloadStatus(int Total, int Completed, int Failed, bool Running, double PerSecond = 0);
+public sealed record JobProgress(string Prefix, string Filter, OperationState State, int Queued, int InFlight, int Completed, int Total);
+
+public sealed record PreloadStatus(int Total, int Completed, int Failed, bool Running, double PerSecond = 0,
+    int Queued = 0, int InFlight = 0, int ActiveWorkers = 0, double? EtaSeconds = null,
+    IReadOnlyList<JobProgress>? Jobs = null);
 
 public enum OperationKind
 {
@@ -78,6 +82,29 @@ public sealed record OperationStatus(
     IReadOnlyList<BackgroundOperation> Operations,
     int ActiveCount);
 
+public sealed record WorkflowBar(
+    string Label,
+    string State,
+    int Completed,
+    int Total,
+    double Percent,
+    bool Active,
+    string? Error = null);
+
+public sealed record WorkflowEvent(
+    string Kind,
+    string State,
+    DateTimeOffset UpdatedAt,
+    int Completed,
+    int Total,
+    string? Error = null);
+
+public sealed record WorkflowStatusView(
+    string Message,
+    WorkflowBar CaptureLoad,
+    WorkflowBar Preload,
+    IReadOnlyList<WorkflowEvent> Timeline);
+
 public sealed record CatalogResult(SearchSnapshot Snapshot, bool FromDatabase);
 
 public sealed record CaptureListViewModel(
@@ -90,7 +117,10 @@ public sealed record CaptureListViewModel(
     string PaginationMode = "server",
     int Page = 1,
     int PageSize = 50,
-    int TotalCaptures = 0)
+    int TotalCaptures = 0,
+    CaptureFacets? Facets = null,
+    CaptureFilter? Active = null,
+    string SearchMode = "url")
 {
     public int TotalPages => Math.Max(1, (int)Math.Ceiling(TotalCaptures / (double)PageSize));
 }
