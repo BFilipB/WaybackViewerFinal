@@ -19,6 +19,32 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
         return lazy.Value.WaitAsync(ct); // concurrent identical requests share one CDX download
     }
 
+    private readonly object refreshLock = new();
+    private readonly HashSet<string> refreshingKeys = new(StringComparer.Ordinal);
+    private readonly List<Task> refreshTasks = new();
+
+    private void StartBackgroundRefresh(string prefix, string filter)
+    {
+        var key = filter + "|" + prefix;
+        lock (refreshLock)
+        {
+            if (!refreshingKeys.Add(key)) return;   // already updating
+            refreshTasks.RemoveAll(t => t.IsCompleted);
+            refreshTasks.Add(Task.Run(async () =>
+            {
+                try { await GetAsync(prefix, filter, refresh: true).ConfigureAwait(false); }
+                catch { /* the saved list stays; the failed operation is recorded by LoadAsync */ }
+                finally { lock (refreshLock) refreshingKeys.Remove(key); }
+            }));
+        }
+    }
+
+    /// Completes when no background refresh is running (used by tests).
+    public Task WhenRefreshesDoneAsync()
+    {
+        lock (refreshLock) return Task.WhenAll(refreshTasks.ToArray());
+    }
+
     public async Task<bool> HasFreshSnapshotAsync(string prefix, string filter, CancellationToken ct = default)
     {
         var saved = await store.GetSearchAsync(prefix, filter, ct).ConfigureAwait(false);
@@ -35,8 +61,15 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
     {
         SearchSnapshot? saved = await store.GetSearchAsync(prefix, filter).ConfigureAwait(false);
 
-        if (!refresh && saved is not null && !IsExpired(saved.CachedAt))
-            return new CatalogResult(saved, true);
+        if (!refresh && saved is not null)
+        {
+            if (!IsExpired(saved.CachedAt)) return new CatalogResult(saved, true);
+
+            // Stale-while-revalidate: show the saved list immediately and update it in the background,
+            // instead of making the page wait for the Wayback Machine.
+            StartBackgroundRefresh(prefix, filter);
+            return new CatalogResult(saved, true, Refreshing: true);
+        }
 
         var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;
         var operation = await store.CreateOrGetOperationAsync(prefix, filter, kind, DateTimeOffset.UtcNow)
@@ -49,7 +82,7 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
         {
             json = await archive.GetStringAsync(ArchiveUrls.Cdx(prefix, filter)).ConfigureAwait(false);
         }
-        catch (Exception ex) when (saved is not null)
+        catch (Exception) when (saved is not null)
         {
             await CompleteAsync(operation, saved.Captures.Count, "Wayback unavailable; showing the previous cached capture list.")
                 .ConfigureAwait(false);

@@ -3,7 +3,7 @@
     ViewData["Title"] = "Wayback Viewer";
     var readyCount = Model.Captures.Count(c => c.Ready);
     var act = Model.Active ?? new CaptureFilter();
-    string Qs(int p, string? year, string? cat, string? st, string? sec)
+    string Qs(int p, string? year, string? cat, string? st, string? sec, string? type = null, bool uniq = false)
     {
         var s = "?url=" + Uri.EscapeDataString(Model.Url) + "&amp;filter=" + Uri.EscapeDataString(Model.Filter)
             + "&amp;pagination=" + Model.PaginationMode + "&amp;page=" + p + "&amp;pageSize=" + Model.PageSize + "&amp;searchMode=" + Uri.EscapeDataString(Model.SearchMode);
@@ -11,16 +11,21 @@
         if (cat is not null) s += "&amp;category=" + Uri.EscapeDataString(cat);
         if (st is not null) s += "&amp;status=" + Uri.EscapeDataString(st);
         if (sec is not null) s += "&amp;section=" + Uri.EscapeDataString(sec);
+        if (type is not null) s += "&amp;type=" + Uri.EscapeDataString(type);
+        if (uniq) s += "&amp;unique=true";
         if (act.Text is not null) s += "&amp;q=" + Uri.EscapeDataString(act.Text);
         return s;
     }
-    string PageLink(int p) => Qs(p, act.Year, act.Category, act.Status, act.Section);
+    string PageLink(int p) => Qs(p, act.Year, act.Category, act.Status, act.Section, act.Kind, act.Unique);
     string Toggle(string kind, string value) => Qs(1,
         kind == "year" ? (act.Year == value ? null : value) : act.Year,
         kind == "category" ? (act.Category == value ? null : value) : act.Category,
         kind == "status" ? (act.Status == value ? null : value) : act.Status,
-        kind == "section" ? (act.Section == value ? null : value) : act.Section);
-    bool IsOn(string kind, string value) => kind switch { "year" => act.Year == value, "category" => act.Category == value, "status" => act.Status == value, _ => act.Section == value };
+        kind == "section" ? (act.Section == value ? null : value) : act.Section,
+        kind == "type" ? (act.Kind == value ? null : value) : act.Kind,
+        act.Unique);
+    string ToggleUnique() => Qs(1, act.Year, act.Category, act.Status, act.Section, act.Kind, !act.Unique);
+    bool IsOn(string kind, string value) => kind switch { "year" => act.Year == value, "category" => act.Category == value, "status" => act.Status == value, "type" => act.Kind == value, _ => act.Section == value };
 }
 
 <form id="searchBar" method="get" class="bar">
@@ -77,8 +82,8 @@
 else if (string.IsNullOrEmpty(Model.Url))
 {
   <p class="empty-state">Enter any website address above (for example <code>example.com/blog/</code>) to list every
-  page the Wayback Machine has captured under it. Captures, pages and extracted text are saved to a local SQLite database
-  database, so the next time they load instantly.</p>
+  page the Wayback Machine has captured under it. Captures, pages and extracted text are saved to a local SQLite database,
+  so the next time they load instantly.</p>
 }
 else if (Model.FromDatabase && Model.CachedAt is not null)
 {
@@ -87,6 +92,15 @@ else if (Model.FromDatabase && Model.CachedAt is not null)
 else if (Model.CachedAt is not null)
 {
   <p class="cache-info">Loaded from Wayback and saved to the database: @Model.CachedAt.Value.LocalDateTime.ToString("yyyy-MM-dd HH:mm")</p>
+}
+
+@if (Model.Refreshing)
+{
+  <p class="cache-info">This list is older than the refresh interval. It is being updated from the Wayback Machine in the background - reload in a moment to see new captures.</p>
+}
+@if (Model.HiddenNotSaved > 0)
+{
+  <p class="cache-info">Downloading only what this view needs. <a href="@Html.Raw(PageLink(Model.Page) + "&amp;downloadAll=true")">Download the other @Model.HiddenNotSaved pages too</a>.</p>
 }
 
 @if (Model.Captures.Count > 0)
@@ -174,14 +188,18 @@ else if (Model.CachedAt is not null)
 @if (Model.Facets is not null)
 {
   <aside class="facets" aria-label="Filters">
-    @foreach (var (title, kind, items) in new[] { ("Category", "category", Model.Facets.Categories), ("Status", "status", Model.Facets.Statuses), ("Section", "section", Model.Facets.Sections) })
+    <div class="panel-title">Threads</div>
+    <ul>
+      <li><a class="facet @(act.Unique ? "on" : "")" href="@Html.Raw(ToggleUnique())" title="Show one capture per thread / post / page: comment links, ?sort= variants, old.reddit and .json copies are folded into one. Every link stays saved."><span>One per thread / post</span><em>@Model.Facets.UniqueCount</em></a></li>
+    </ul>
+    @foreach (var (title, kind, items) in new[] { ("Type", "type", Model.Facets.Kinds ?? Array.Empty<FacetCount>()), ("Category", "category", Model.Facets.Categories), ("Status", "status", Model.Facets.Statuses), ("Section", "section", Model.Facets.Sections) })
     {
       if (items.Count == 0) { continue; }
       <div class="panel-title">@title</div>
       <ul>
         @foreach (var f in items)
         {
-          <li><a class="facet @(IsOn(kind, f.Value) ? "on" : "")" href="@Html.Raw(Toggle(kind, f.Value))"><span>@f.Value</span><em>@f.Count</em></a></li>
+          <li><a class="facet @(IsOn(kind, f.Value) ? "on" : "")" href="@Html.Raw(Toggle(kind, f.Value))"><span>@(kind == "type" ? UrlClassifier.Label(f.Value) : f.Value)</span><em>@f.Count</em></a></li>
         }
       </ul>
     }
@@ -192,11 +210,13 @@ else if (Model.CachedAt is not null)
 <div class="capture-list" id="captureList">
 @foreach (var c in Model.Captures)
 {
-  <div class="card capture-row" data-key="@c.Capture.ArchiveUrl" data-ts="@c.Capture.Timestamp" data-url="@c.Capture.Original" data-ready="@(c.Ready ? "1" : "0")" data-frame="/Home/Frame?ts=@c.Capture.Timestamp&amp;url=@Uri.EscapeDataString(c.Capture.Original)">
+  var info = UrlClassifier.Classify(c.Capture.Original);
+  var folded = Model.GroupSizes is not null && Model.GroupSizes.TryGetValue(info.GroupKey, out var groupCount) && groupCount > 1 ? groupCount : 0;
+  <div class="card capture-row" data-kind="@info.Kind" data-key="@c.Capture.ArchiveUrl" data-ts="@c.Capture.Timestamp" data-url="@c.Capture.Original" data-ready="@(c.Ready ? "1" : "0")" data-frame="/Home/Frame?ts=@c.Capture.Timestamp&amp;url=@Uri.EscapeDataString(c.Capture.Original)">
     <div class="meta">
       <div class="capture-date">@c.Capture.Date.ToString("yyyy-MM-dd HH:mm")</div>
       <div class="url" title="@c.Capture.Original">@c.Capture.Original</div>
-      <div class="capture-details">Status @c.Capture.StatusCode &middot; @c.Capture.MimeType</div>
+      <div class="capture-details"><span class="kind kind-@info.Kind.ToLowerInvariant()">@info.Kind</span> Status @c.Capture.StatusCode &middot; @c.Capture.MimeType@if (folded > 0) { <span class="folded" title="Saved links that show the same thread/post/page and are hidden by 'One per thread / post'"> &middot; +@(folded - 1) more saved links</span> }</div>
       <div class="row">
         <a class="btn" href="@c.Capture.ArchiveUrl" target="_blank" rel="noopener">Open</a>
         <button class="view">View in slideshow</button>
@@ -678,7 +698,7 @@ else if (Model.CachedAt is not null)
     params.set('url', url);
     params.set('filter', q.get('filter') || searchBar?.querySelector('[name=filter]')?.value || 'html200');
     params.set('searchMode', q.get('searchMode') || searchBar?.querySelector('[name=searchMode]')?.value || 'url');
-    ['year','category','status','section','q'].forEach(k => { const v = q.get(k); if (v) params.set(k, v); });
+    ['year','category','status','section','q','type','unique'].forEach(k => { const v = q.get(k); if (v) params.set(k, v); });
     const r = await fetch('/Home/CaptureSet?' + params.toString());
     if (!r.ok) throw new Error('Could not load full filtered capture set');
     return await r.json();
@@ -1115,4 +1135,25 @@ else if (Model.CachedAt is not null)
     } catch { setTimeout(pollWorkflow, 2000); }
   }
   pollWorkflow();
+
+  // ---------------------------------------------------------------- instant feel
+  // 1) Click feedback at once: dim the list and show a thin progress bar while the next page loads.
+  document.addEventListener('click', e => {
+    const a = e.target.closest && e.target.closest('a.facet, a.tl-bar, a.clear, nav.pager a');
+    if (!a || e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || a.target === '_blank') return;
+    document.body.classList.add('nav-pending');
+    document.querySelectorAll('.capture-list, .facets, .timeline').forEach(el => el.classList.add('is-loading'));
+  }, true);
+  window.addEventListener('pageshow', () => {            // coming back via the back button restores the page as it was
+    document.body.classList.remove('nav-pending');
+    document.querySelectorAll('.is-loading').forEach(el => el.classList.remove('is-loading'));
+  });
+
+  // 2) While the browser is idle, fetch the text of the first saved rows. They are cached by the browser, so the
+  //    slideshow opens on its first slides without a wait.
+  (function warmFirstTexts() {
+    const go = () => [...document.querySelectorAll('.capture-row')].filter(row => row.dataset.ready === '1').slice(0, 12).forEach(row =>
+      fetch('/Home/Text?ts=' + row.dataset.ts + '&url=' + encodeURIComponent(row.dataset.url)).catch(() => {}));
+    (window.requestIdleCallback || (fn => setTimeout(fn, 800)))(go);
+  })();
 </script>

@@ -105,7 +105,7 @@ public sealed record WorkflowStatusView(
     WorkflowBar Preload,
     IReadOnlyList<WorkflowEvent> Timeline);
 
-public sealed record CatalogResult(SearchSnapshot Snapshot, bool FromDatabase);
+public sealed record CatalogResult(SearchSnapshot Snapshot, bool FromDatabase, bool Refreshing = false);
 
 public sealed record CaptureListViewModel(
     string Url,
@@ -120,7 +120,10 @@ public sealed record CaptureListViewModel(
     int TotalCaptures = 0,
     CaptureFacets? Facets = null,
     CaptureFilter? Active = null,
-    string SearchMode = "url")
+    string SearchMode = "url",
+    IReadOnlyDictionary<string, int>? GroupSizes = null,
+    int HiddenNotSaved = 0,
+    bool Refreshing = false)
 {
     public int TotalPages => Math.Max(1, (int)Math.Ceiling(TotalCaptures / (double)PageSize));
 }

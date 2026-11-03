@@ -24,6 +24,14 @@ public static class AppBuilder
         services.Configure<StorageOptions>(builder.Configuration.GetSection("Storage"));
 
         services.AddControllersWithViews().AddApplicationPart(typeof(HomeController).Assembly);
+        services.AddResponseCompression(o =>
+        {
+            o.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
+            o.Providers.Add<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProvider>();
+            o.MimeTypes = Microsoft.AspNetCore.ResponseCompression.ResponseCompressionDefaults.MimeTypes.Concat(["application/json"]);
+        });
+        services.Configure<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+        services.Configure<Microsoft.AspNetCore.ResponseCompression.GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
 
         services.AddSingleton<ITimeSource, SystemTimeSource>();
         services.AddSingleton<IArchiveStoreProvider, SqliteArchiveStoreProvider>();
@@ -42,6 +50,8 @@ public static class AppBuilder
         services.AddTransient<LegacyCacheImporter>();
         services.AddHostedService<StoreInitializer>();
         services.AddHostedService(sp => sp.GetRequiredService<PreloadCoordinator>());
+        services.AddSingleton<WarmupService>();
+        services.AddHostedService(sp => sp.GetRequiredService<WarmupService>());
 
         services.AddRateLimiter(o =>
         {
@@ -62,6 +72,7 @@ public static class AppBuilder
         configureServices?.Invoke(services);
 
         var app = builder.Build();
+        app.UseResponseCompression();   // big list pages and the filtered-set JSON shrink 10-20x
         app.UseRouting();
         app.UseRateLimiter();
         app.MapGet("/healthz", async (IArchiveStore store) =>

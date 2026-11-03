@@ -13,6 +13,9 @@ public sealed class ArchiveOptions
 
 public sealed class PreloadOptions
 {
+    /// "view" (default): download only the captures in the list you are looking at (filters, one-per-thread ...).
+    /// "all": download every HTML capture of the search in the background.
+    public string Scope { get; set; } = "view";
     public int Workers { get; set; } = 8;
     public int WriteBatchSize { get; set; } = 50;
     public int WriteMaxDelayMs { get; set; } = 300;

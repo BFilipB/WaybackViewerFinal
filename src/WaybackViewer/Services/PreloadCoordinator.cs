@@ -62,6 +62,31 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
     public int Enqueue(IEnumerable<StoredCapture> captures)
         => Enqueue(captures, null, null);
 
+    // ---- per page view ---------------------------------------------------------------------------------
+    // Every page view asks for the downloads its list needs. The same view asked again within a few seconds
+    // (paging, re-sorting, a reload) changes nothing, so it returns immediately instead of re-checking 100,000 rows.
+    private static readonly TimeSpan ViewThrottle = TimeSpan.FromSeconds(5);
+    private readonly Dictionary<string, ((int Count, long First, long Last) Signature, long Ticks)> lastViews = new();
+
+    /// Queues what the list needs and moves it ahead of anything queued earlier for a different view.
+    public int EnqueueView(IReadOnlyList<StoredCapture> view, string prefix, string filter, bool boost = true)
+    {
+        var key = $"{filter}|{prefix}";
+        var signature = view.Count == 0 ? (0, 0L, 0L) : (view.Count, view[0].Id, view[^1].Id);
+        lock (gate)
+        {
+            if (lastViews.TryGetValue(key, out var last) && last.Signature == signature &&
+                Stopwatch.GetElapsedTime(last.Ticks) < ViewThrottle)
+                return 0;
+            lastViews[key] = (signature, Stopwatch.GetTimestamp());
+        }
+
+        var added = Enqueue(view, prefix, filter);
+        if (boost)   // oldest first, which is the slideshow order
+            Boost(view.Where(c => c.Capture.IsHtml && !c.Ready).Take(50_000).Reverse().Select(c => c.Capture.Key));
+        return added;
+    }
+
     public int Enqueue(IEnumerable<StoredCapture> captures, string? prefix, string? filter)
     {
         using var scope = log.BeginScope(new Dictionary<string, object?>
@@ -71,15 +96,27 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             ["filter"] = filter
         });
 
-        var items = captures.ToList();
-        var htmlItems = items.Where(item => item.Capture.IsHtml).ToList();
-        var readyItems = htmlItems.Count(item => item.Ready);
+        // One pass: how many HTML captures there are, how many are saved, and which still need downloading.
+        var htmlCount = 0;
+        var readyItems = 0;
+        var needed = new List<StoredCapture>();
+        foreach (var item in captures)
+        {
+            if (!item.Capture.IsHtml) continue;
+            htmlCount++;
+            if (item.Ready) readyItems++;
+            else needed.Add(item);
+        }
+
         BackgroundOperation? requestedOperation = null;
         var jobKey = string.Empty;
         if (prefix is not null && filter is not null)
         {
-            requestedOperation = store.CreateOrGetOperationAsync(prefix, filter, OperationKind.PagePreload,
-                DateTimeOffset.UtcNow).GetAwaiter().GetResult();
+            // Known job: reuse it instead of writing to the database again on every page view.
+            JobState? known;
+            lock (gate) jobs.TryGetValue($"{OperationKind.PagePreload}|{filter}|{prefix}", out known);
+            requestedOperation = known?.Operation ?? store.CreateOrGetOperationAsync(prefix, filter,
+                OperationKind.PagePreload, DateTimeOffset.UtcNow).GetAwaiter().GetResult();
             jobKey = requestedOperation.Key;
         }
 
@@ -103,15 +140,19 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
             var wasBusy = IsBusyLocked();
             var added = 0;
 
-            foreach (var item in items
-                         .Where(c => !c.Ready && c.Capture.IsHtml)
-                         .OrderBy(c => c.Capture.Timestamp, StringComparer.Ordinal))
+            List<StoredCapture>? fresh = null;
+            foreach (var item in needed)
             {
                 var key = item.Capture.Key;
                 if (pendingIndex.ContainsKey(key) || inFlight.ContainsKey(key)) continue;
-                AddPendingLocked(new PendingCapture(item.Capture, jobKey));
-                added++;
+                (fresh ??= new List<StoredCapture>()).Add(item);
             }
+            if (fresh is not null)
+                foreach (var item in OldestFirst(fresh))   // only what is actually new gets ordered
+                {
+                    AddPendingLocked(new PendingCapture(item.Capture, jobKey));
+                    added++;
+                }
 
             if (added == 0) return 0;
             if (!wasBusy)
@@ -131,7 +172,7 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
                 {
                     State = resumedPaused ? OperationState.Paused : OperationState.Running,
                     UpdatedAt = DateTimeOffset.UtcNow,
-                    Total = Math.Max(requestedJob.Operation.Total, htmlItems.Count),
+                    Total = Math.Max(requestedJob.Operation.Total, htmlCount),
                     Completed = requestedJob.BaseCompleted + completed,
                     Failed = failed,
                     Error = null
@@ -144,6 +185,17 @@ public sealed class PreloadCoordinator : IHostedService, IDisposable
 
             return added;
         }
+    }
+
+    /// Oldest capture first (slideshow order). Lists from the store are newest-first, so reversing is enough and
+    /// avoids sorting; anything else is sorted.
+    private static IEnumerable<StoredCapture> OldestFirst(List<StoredCapture> items)
+    {
+        var descending = true;
+        for (var i = 1; i < items.Count && descending; i++)
+            if (string.CompareOrdinal(items[i - 1].Capture.Timestamp, items[i].Capture.Timestamp) < 0) descending = false;
+        if (descending) { items.Reverse(); return items; }
+        return items.OrderBy(c => c.Capture.Timestamp, StringComparer.Ordinal);
     }
 
     public void Pause(string? prefix = null, string? filter = null)

@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using WaybackViewer.Models;
 using WaybackViewer.Parsing;
 using WaybackViewer.Services;
@@ -8,14 +9,15 @@ using WaybackViewer.Storage;
 namespace WaybackViewer.Controllers;
 
 public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCoordinator preload, IArchiveStore store,
-    FacetCache facetCache, ILogger<HomeController> log) : Controller
+    FacetCache facetCache, IOptions<PreloadOptions> preloadOptions, ILogger<HomeController> log) : Controller
 {
     private readonly Dictionary<string, (DateTimeOffset At, List<StoredCapture> Items)> textSearchCache =
         new(StringComparer.Ordinal);
 
     public async Task<IActionResult> Index(string? url, string? filter, bool refresh = false,
         string? pagination = null, int page = 1, int pageSize = 50, string? year = null, string? category = null,
-        string? status = null, string? section = null, string? q = null, string? searchMode = null, CancellationToken ct = default)
+        string? status = null, string? section = null, string? q = null, string? searchMode = null,
+        string? type = null, string? unique = null, string? downloadAll = null, CancellationToken ct = default)
     {
         using var scope = log.BeginScope(new Dictionary<string, object?>
         {
@@ -43,34 +45,73 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         try
         {
             var result = await catalog.GetAsync(prefix, activeFilter, refresh, ct);
-            if (result.Snapshot.Captures.Any(c => c.Capture.IsHtml && !c.Ready))
-                preload.Enqueue(result.Snapshot.Captures, prefix, activeFilter);
+            var hiddenNotSaved = 0;
+            var everything = result.Snapshot.Captures;
+            var downloadEverything = IsTrue(downloadAll) ||
+                                     string.Equals(preloadOptions.Value.Scope, "all", StringComparison.OrdinalIgnoreCase);
+
+            // Download in the background only what the current view needs (filters, one per thread ...).
+            // The rest stays one click away ("download the rest") instead of costing minutes of traffic.
+            void QueueDownloads(IReadOnlyList<StoredCapture> view)
+            {
+                var queue = downloadEverything ? everything : view;
+                if (!downloadEverything)
+                    hiddenNotSaved = everything.Count(c => c.Capture.IsHtml && !c.Ready) - view.Count(c => c.Capture.IsHtml && !c.Ready);
+
+                // A browser that only guesses where you will click next (prefetch) must not start downloads.
+                var prefetch = Request.Headers.TryGetValue("Sec-Purpose", out var purpose) &&
+                               purpose.ToString().Contains("prefetch", StringComparison.OrdinalIgnoreCase);
+                if (prefetch || !queue.Any(c => c.Capture.IsHtml && !c.Ready)) return;
+
+                var boost = !downloadEverything;
+                // Off the request: queueing tens of thousands of downloads must never delay drawing the page.
+                _ = Task.Run(() =>
+                {
+                    try { preload.EnqueueView(queue, prefix, activeFilter, boost); }
+                    catch (Exception ex) { log.LogWarning(ex, "Queueing downloads failed"); }
+                });
+            }
+
             var total = result.Snapshot.Captures.Count;
             var totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
             IReadOnlyList<StoredCapture> shown = result.Snapshot.Captures;
             var facets = facetCache.GetOrBuild(result.Snapshot);
-            var cf = new CaptureFilter(Clean(year), Clean(category), Clean(status), Clean(section), Clean(q));
+            var cf = new CaptureFilter(Clean(year), Clean(category), Clean(status), Clean(section), Clean(q),
+                UrlClassifier.NormalizeKind(type), IsTrue(unique));
             var fullText = IsContentSearch(modeOfSearch, q);
+            IReadOnlyDictionary<string, int>? groupSizes = null;
             if (fullText)
             {
                 var searched = await ApplyFullTextFilterAsync(result.Snapshot.Captures, ContentTerm(q), ct);
+                QueueDownloads(everything);   // a content search can only match saved pages, so keep saving all of them
+                var structural = cf with { Text = null };
+                if (structural.IsActive)
+                {
+                    if (cf.Unique) groupSizes = CaptureFacets.GroupSizes(searched, structural);
+                    searched = CaptureFacets.Apply(searched, structural);
+                }
                 total = searched.Count;
                 totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
                 page = Math.Clamp(page, 1, totalPages);
                 shown = mode == "server" ? searched.Skip((page - 1) * pageSize).Take(pageSize).ToList() : searched;
                 return View(new CaptureListViewModel(prefix, activeFilter, shown, null,
                     result.FromDatabase, result.Snapshot.CachedAt, mode, page, pageSize, total, facets,
-                    cf with { Text = ContentTerm(q) }, SearchMode: modeOfSearch));
+                    cf with { Text = ContentTerm(q) }, SearchMode: modeOfSearch, GroupSizes: groupSizes,
+                    HiddenNotSaved: hiddenNotSaved, Refreshing: result.Refreshing));
             }
             if (cf.IsActive)
             {
-                var filtered = CaptureFacets.Apply(result.Snapshot.Captures, cf);
+                var filteredView = facetCache.GetOrApply(result.Snapshot, cf);   // remembered per list and filter
+                var filtered = filteredView.Items;
+                groupSizes = filteredView.GroupSizes;
+                QueueDownloads(filtered);
                 total = filtered.Count;
                 totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
                 page = Math.Clamp(page, 1, totalPages);
                 shown = mode == "server" ? filtered.Skip((page - 1) * pageSize).Take(pageSize).ToList() : filtered;
             }
-            else if (mode == "server")
+            else QueueDownloads(everything);
+            if (!cf.IsActive && mode == "server")
             {
                 var requestedPage = page;
                 var paged = await store.GetSearchPageAsync(prefix, activeFilter, 0, 0, ct);
@@ -84,7 +125,8 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
                 }
             }
             return View(new CaptureListViewModel(prefix, activeFilter, shown, null,
-                result.FromDatabase, result.Snapshot.CachedAt, mode, page, pageSize, total, facets, cf, modeOfSearch));
+                result.FromDatabase, result.Snapshot.CachedAt, mode, page, pageSize, total, facets, cf, modeOfSearch,
+                groupSizes, hiddenNotSaved, result.Refreshing));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -97,6 +139,10 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     }
 
     private static string? Clean(string? v) => string.IsNullOrWhiteSpace(v) ? null : v.Trim();
+
+    private static bool IsTrue(string? v) =>
+        v is not null && (v.Equals("true", StringComparison.OrdinalIgnoreCase) || v == "1" ||
+                          v.Equals("on", StringComparison.OrdinalIgnoreCase) || v.Equals("yes", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsContentSearch(string mode, string? query) =>
         mode == "content" || (!string.IsNullOrWhiteSpace(query) && query.Trim().StartsWith("text:", StringComparison.OrdinalIgnoreCase));
@@ -178,7 +224,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     /// Full capture set for the current query/filter/facets, independent of current page rendering.
     public async Task<IActionResult> CaptureSet(string url, string? filter,
         string? year = null, string? category = null, string? status = null, string? section = null, string? q = null,
-        string? searchMode = null, CancellationToken ct = default)
+        string? searchMode = null, string? type = null, string? unique = null, CancellationToken ct = default)
     {
         var prefix = UrlInput.NormalizePrefix(url ?? "");
         if (prefix is null) return BadRequest();
@@ -187,19 +233,22 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         var mode = NormalizeSearchMode(searchMode);
         var result = await catalog.GetAsync(prefix, activeFilter, false, ct);
         IReadOnlyList<StoredCapture> captures = result.Snapshot.Captures;
-        var cf = new CaptureFilter(Clean(year), Clean(category), Clean(status), Clean(section), Clean(q));
+        var cf = new CaptureFilter(Clean(year), Clean(category), Clean(status), Clean(section), Clean(q),
+            UrlClassifier.NormalizeKind(type), IsTrue(unique));
         if (IsContentSearch(mode, q))
+        {
             captures = await ApplyFullTextFilterAsync(result.Snapshot.Captures, ContentTerm(q), ct);
+            var structural = cf with { Text = null };
+            if (structural.IsActive) captures = CaptureFacets.Apply(captures, structural);
+        }
         else if (cf.IsActive)
-            captures = CaptureFacets.Apply(result.Snapshot.Captures, cf);
+            captures = facetCache.GetOrApply(result.Snapshot, cf).Items;
 
         return Json(captures.Select(c => new
         {
             ts = c.Capture.Timestamp,
             url = c.Capture.Original,
-            archiveUrl = c.Capture.ArchiveUrl,
-            frameUrl = $"/Home/Frame?ts={c.Capture.Timestamp}&url={Uri.EscapeDataString(c.Capture.Original)}",
-            ready = c.Ready
+            ready = c.Ready   // archive / frame links are derived in the browser (about 60% smaller payload)
         }));
     }
 
@@ -223,6 +272,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         if (!UrlInput.IsValidTimestamp(ts) || !UrlInput.IsValidCaptureUrl(url)) return BadRequest();
 
         var page = await pages.GetAsync(ts, url, includeHtml: false, ct);
+        if (page is not null) Response.Headers.CacheControl = "private,max-age=3600"; // a capture at a fixed timestamp never changes
         return Json(page is null
             ? new PageText(null, null, "", "The capture could not be loaded from the Wayback Machine.")
             : new PageText(page.Parsed.Title, page.Parsed.Description, page.Parsed.Text));

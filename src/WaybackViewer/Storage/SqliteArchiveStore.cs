@@ -1,5 +1,6 @@
 using Microsoft.Data.Sqlite;
 using WaybackViewer.Models;
+using WaybackViewer.Parsing;
 
 namespace WaybackViewer.Storage;
 
@@ -67,6 +68,31 @@ public sealed class SqliteArchiveStore : IArchiveStore
     private readonly HtmlFileStore htmlFiles;
     private readonly SemaphoreSlim writeLock = new(1, 1);
 
+    // ---- in-memory snapshot cache -------------------------------------------------------------------------
+    // A capture list is read from SQLite once and then served from memory: clicking a page number or a filter no
+    // longer re-reads (and re-sorts) 100,000 rows. Which captures are saved is tracked in one id set that is
+    // updated whenever pages are written, so the "saved" flags stay correct without touching the list.
+    private const int MaxCachedSearches = 4;
+    private readonly object cacheLock = new();
+    private readonly SemaphoreSlim loadGate = new(1, 1);
+    private readonly Dictionary<string, CachedSearch> searchCache = new(StringComparer.Ordinal);
+    private HashSet<long>? savedIds;
+    private long savedVersion;
+    private long useTick;
+
+    private sealed class CachedSearch(long searchId, DateTimeOffset cachedAt, long[] ids, Capture[] captures)
+    {
+        public readonly long SearchId = searchId;
+        public readonly DateTimeOffset CachedAt = cachedAt;
+        public readonly long[] Ids = ids;
+        public readonly Capture[] Captures = captures;
+        public SearchSnapshot? Composed;
+        public long ComposedVersion = -1;
+        public long LastUsed;
+    }
+
+    private static string CacheKey(string prefix, string filter) => filter + "|" + prefix;
+
     public SqliteArchiveStore(string connectionString)
         : this(connectionString, new HtmlFileStore(AppBuilder.ResolveDatabasePath("html-payloads")))
     {
@@ -98,84 +124,70 @@ public sealed class SqliteArchiveStore : IArchiveStore
         return 0;
     }, ct);
 
-    public Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit,
-        CancellationToken ct = default) => Task.Run(() =>
-        {
-            using var conn = Open();
-            long id;
-            DateTimeOffset cachedAt;
-            using (var find = Cmd(conn, null, "SELECT Id, CachedAtUtc FROM Searches WHERE UrlPrefix = $p AND Filter = $f"))
-            {
-                find.Parameters.AddWithValue("$p", prefix);
-                find.Parameters.AddWithValue("$f", filter);
-                using var reader = find.ExecuteReader();
-                if (!reader.Read()) return null;
-                id = reader.GetInt64(0);
-                cachedAt = DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(1));
-            }
-
-            using var count = Cmd(conn, null, "SELECT COUNT(*) FROM SearchCaptures WHERE SearchId = $id");
-            count.Parameters.AddWithValue("$id", id);
-            var total = Convert.ToInt32(count.ExecuteScalar());
-            var captures = LoadSnapshotPage(conn, id, Math.Max(0, offset), Math.Max(0, limit));
-            return (PagedSearchResult?)new PagedSearchResult(id, cachedAt, captures, total);
-        }, ct);
+    public async Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit,
+        CancellationToken ct = default)
+    {
+        var snapshot = await GetCachedSnapshotAsync(prefix, filter, ct).ConfigureAwait(false);
+        if (snapshot is null) return null;
+        var slice = snapshot.Captures.Skip(Math.Max(0, offset)).Take(Math.Max(0, limit)).ToList();
+        return new PagedSearchResult(snapshot.SearchId, snapshot.CachedAt, slice, snapshot.Captures.Count);
+    }
 
     public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind,
         CancellationToken ct = default) => Task.Run(() =>
-    {
-        using var conn = Open();
-        using var cmd = Cmd(conn, null, "SELECT * FROM Operations WHERE UrlPrefix = $p AND Filter = $f AND Kind = $k");
-        cmd.Parameters.AddWithValue("$p", prefix);
-        cmd.Parameters.AddWithValue("$f", filter);
-        cmd.Parameters.AddWithValue("$k", (int)kind);
-        using var reader = cmd.ExecuteReader();
-        if (!reader.Read()) return null;
-        var operation = ReadOperation(reader);
-        return operation.IsActive ? operation : null;
-    }, ct);
+        {
+            using var conn = Open();
+            using var cmd = Cmd(conn, null, "SELECT * FROM Operations WHERE UrlPrefix = $p AND Filter = $f AND Kind = $k");
+            cmd.Parameters.AddWithValue("$p", prefix);
+            cmd.Parameters.AddWithValue("$f", filter);
+            cmd.Parameters.AddWithValue("$k", (int)kind);
+            using var reader = cmd.ExecuteReader();
+            if (!reader.Read()) return null;
+            var operation = ReadOperation(reader);
+            return operation.IsActive ? operation : null;
+        }, ct);
 
     public Task<BackgroundOperation> CreateOrGetOperationAsync(string prefix, string filter, OperationKind kind,
         DateTimeOffset now, CancellationToken ct = default) => WriteAsync(() =>
-    {
-        using var conn = Open();
-        using var find = Cmd(conn, null, "SELECT * FROM Operations WHERE UrlPrefix = $p AND Filter = $f AND Kind = $k");
-        find.Parameters.AddWithValue("$p", prefix);
-        find.Parameters.AddWithValue("$f", filter);
-        find.Parameters.AddWithValue("$k", (int)kind);
-        using (var reader = find.ExecuteReader())
         {
-            if (reader.Read())
+            using var conn = Open();
+            using var find = Cmd(conn, null, "SELECT * FROM Operations WHERE UrlPrefix = $p AND Filter = $f AND Kind = $k");
+            find.Parameters.AddWithValue("$p", prefix);
+            find.Parameters.AddWithValue("$f", filter);
+            find.Parameters.AddWithValue("$k", (int)kind);
+            using (var reader = find.ExecuteReader())
             {
-                var existing = ReadOperation(reader);
-                if (existing.IsActive) return existing;
+                if (reader.Read())
+                {
+                    var existing = ReadOperation(reader);
+                    if (existing.IsActive) return existing;
+                }
             }
-        }
 
-        using var cmd = Cmd(conn, null, """
+            using var cmd = Cmd(conn, null, """
             INSERT INTO Operations (UrlPrefix, Filter, Kind, State, CreatedAt, UpdatedAt, Total, Completed, Failed, Error)
             VALUES ($p, $f, $k, $state, $created, $updated, 0, 0, 0, NULL)
             ON CONFLICT (UrlPrefix, Filter, Kind) DO UPDATE SET
                 State = excluded.State, CreatedAt = excluded.CreatedAt, UpdatedAt = excluded.UpdatedAt,
                 Total = 0, Completed = 0, Failed = 0, Error = NULL
             """);
-        var stamp = now.ToUnixTimeMilliseconds();
-        cmd.Parameters.AddWithValue("$p", prefix);
-        cmd.Parameters.AddWithValue("$f", filter);
-        cmd.Parameters.AddWithValue("$k", (int)kind);
-        cmd.Parameters.AddWithValue("$state", (int)OperationState.Queued);
-        cmd.Parameters.AddWithValue("$created", stamp);
-        cmd.Parameters.AddWithValue("$updated", stamp);
-        cmd.ExecuteNonQuery();
+            var stamp = now.ToUnixTimeMilliseconds();
+            cmd.Parameters.AddWithValue("$p", prefix);
+            cmd.Parameters.AddWithValue("$f", filter);
+            cmd.Parameters.AddWithValue("$k", (int)kind);
+            cmd.Parameters.AddWithValue("$state", (int)OperationState.Queued);
+            cmd.Parameters.AddWithValue("$created", stamp);
+            cmd.Parameters.AddWithValue("$updated", stamp);
+            cmd.ExecuteNonQuery();
 
-        using var result = Cmd(conn, null, "SELECT * FROM Operations WHERE UrlPrefix = $p AND Filter = $f AND Kind = $k");
-        result.Parameters.AddWithValue("$p", prefix);
-        result.Parameters.AddWithValue("$f", filter);
-        result.Parameters.AddWithValue("$k", (int)kind);
-        using var row = result.ExecuteReader();
-        row.Read();
-        return ReadOperation(row);
-    }, ct);
+            using var result = Cmd(conn, null, "SELECT * FROM Operations WHERE UrlPrefix = $p AND Filter = $f AND Kind = $k");
+            result.Parameters.AddWithValue("$p", prefix);
+            result.Parameters.AddWithValue("$f", filter);
+            result.Parameters.AddWithValue("$k", (int)kind);
+            using var row = result.ExecuteReader();
+            row.Read();
+            return ReadOperation(row);
+        }, ct);
 
     public Task<BackgroundOperation?> GetOperationAsync(long id, CancellationToken ct = default) => Task.Run(() =>
     {
@@ -188,17 +200,17 @@ public sealed class SqliteArchiveStore : IArchiveStore
 
     public Task<IReadOnlyList<BackgroundOperation>> GetOperationsAsync(bool activeOnly = false,
         CancellationToken ct = default) => Task.Run(() =>
-    {
-        using var conn = Open();
-        var sql = activeOnly
-            ? "SELECT * FROM Operations WHERE State IN (0, 1, 2, 3, 5) ORDER BY UpdatedAt DESC"
-            : "SELECT * FROM Operations ORDER BY UpdatedAt DESC";
-        using var cmd = Cmd(conn, null, sql);
-        using var reader = cmd.ExecuteReader();
-        var result = new List<BackgroundOperation>();
-        while (reader.Read()) result.Add(ReadOperation(reader));
-        return (IReadOnlyList<BackgroundOperation>)result;
-    }, ct);
+        {
+            using var conn = Open();
+            var sql = activeOnly
+                ? "SELECT * FROM Operations WHERE State IN (0, 1, 2, 3, 5) ORDER BY UpdatedAt DESC"
+                : "SELECT * FROM Operations ORDER BY UpdatedAt DESC";
+            using var cmd = Cmd(conn, null, sql);
+            using var reader = cmd.ExecuteReader();
+            var result = new List<BackgroundOperation>();
+            while (reader.Read()) result.Add(ReadOperation(reader));
+            return (IReadOnlyList<BackgroundOperation>)result;
+        }, ct);
 
     public Task UpdateOperationAsync(BackgroundOperation operation, CancellationToken ct = default) => WriteAsync(() =>
     {
@@ -219,22 +231,106 @@ public sealed class SqliteArchiveStore : IArchiveStore
     }, ct);
 
     public Task<SearchSnapshot?> GetSearchAsync(string prefix, string filter, CancellationToken ct = default) =>
-        Task.Run(() =>
+        GetCachedSnapshotAsync(prefix, filter, ct);
+
+    private async Task<SearchSnapshot?> GetCachedSnapshotAsync(string prefix, string filter, CancellationToken ct)
+    {
+        var key = CacheKey(prefix, filter);
+        var hit = TryGetCached(key);
+        if (hit is not null) return hit;
+
+        await loadGate.WaitAsync(ct).ConfigureAwait(false);   // one cold load at a time; the rest wait and then hit the cache
+        try
         {
-            using var conn = Open();
-            long id;
-            long cachedAt;
-            using (var cmd = Cmd(conn, null, "SELECT Id, CachedAtUtc FROM Searches WHERE UrlPrefix = $p AND Filter = $f"))
+            hit = TryGetCached(key);
+            if (hit is not null) return hit;
+
+            return await Task.Run(() =>
             {
-                cmd.Parameters.AddWithValue("$p", prefix);
-                cmd.Parameters.AddWithValue("$f", filter);
-                using var reader = cmd.ExecuteReader();
-                if (!reader.Read()) return null;
-                id = reader.GetInt64(0);
-                cachedAt = reader.GetInt64(1);
-            }
-            return (SearchSnapshot?)LoadSnapshot(conn, id, DateTimeOffset.FromUnixTimeMilliseconds(cachedAt));
-        }, ct);
+                using var conn = Open();
+                long id;
+                long cachedAtMs;
+                using (var find = Cmd(conn, null, "SELECT Id, CachedAtUtc FROM Searches WHERE UrlPrefix = $p AND Filter = $f"))
+                {
+                    find.Parameters.AddWithValue("$p", prefix);
+                    find.Parameters.AddWithValue("$f", filter);
+                    using var reader = find.ExecuteReader();
+                    if (!reader.Read()) return (SearchSnapshot?)null;
+                    id = reader.GetInt64(0);
+                    cachedAtMs = reader.GetInt64(1);
+                }
+
+                var loaded = LoadCachedSearch(conn, id, DateTimeOffset.FromUnixTimeMilliseconds(cachedAtMs));
+                UrlClassifier.Warm(loaded.Captures.Select(c => c.Original).ToArray()); // parallel, so the first filter click is fast too
+                EnsureSavedIds(conn);
+                lock (cacheLock)
+                {
+                    loaded.LastUsed = ++useTick;
+                    searchCache[key] = loaded;
+                    while (searchCache.Count > MaxCachedSearches)
+                    {
+                        var oldest = searchCache.MinBy(p => p.Value.LastUsed).Key;
+                        searchCache.Remove(oldest);
+                    }
+                    return Compose(loaded);
+                }
+            }, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            loadGate.Release();
+        }
+    }
+
+    private SearchSnapshot? TryGetCached(string key)
+    {
+        lock (cacheLock)
+        {
+            if (savedIds is null || !searchCache.TryGetValue(key, out var cached)) return null;
+            cached.LastUsed = ++useTick;
+            return Compose(cached);
+        }
+    }
+
+    /// Builds (or reuses) the snapshot with current "saved" flags. Reused until a page is written.
+    private SearchSnapshot Compose(CachedSearch cached)
+    {
+        lock (cacheLock)
+        {
+            if (cached.Composed is not null && cached.ComposedVersion == savedVersion) return cached.Composed;
+            var saved = savedIds!;
+            var list = new List<StoredCapture>(cached.Ids.Length);
+            for (var i = 0; i < cached.Ids.Length; i++)
+                list.Add(new StoredCapture(cached.Ids[i], cached.Captures[i], saved.Contains(cached.Ids[i])));
+            cached.Composed = new SearchSnapshot(cached.SearchId, cached.CachedAt, list);
+            cached.ComposedVersion = savedVersion;
+            return cached.Composed;
+        }
+    }
+
+    private void EnsureSavedIds(SqliteConnection conn)
+    {
+        lock (cacheLock)   // held while reading so a concurrent SavePages cannot be missed (see MarkSaved)
+        {
+            if (savedIds is not null) return;
+            var set = new HashSet<long>();
+            using var cmd = Cmd(conn, null, "SELECT CaptureId FROM Pages");
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) set.Add(reader.GetInt64(0));
+            savedIds = set;
+            savedVersion++;
+        }
+    }
+
+    private void MarkSaved(List<long> ids)
+    {
+        lock (cacheLock)
+        {
+            if (savedIds is null) return;   // not loaded yet: the first load reads everything that is committed
+            foreach (var id in ids) savedIds.Add(id);
+            savedVersion++;
+        }
+    }
 
     public async Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> captures,
         DateTimeOffset cachedAt, CancellationToken ct = default)
@@ -298,11 +394,8 @@ public sealed class SqliteArchiveStore : IArchiveStore
             return id;
         }, ct);
 
-        return await Task.Run(() =>
-        {
-            using var conn = Open();
-            return LoadSnapshot(conn, searchId, cachedAt);
-        }, ct);
+        lock (cacheLock) searchCache.Remove(CacheKey(prefix, filter));   // the list changed: drop the old copy
+        return (await GetCachedSnapshotAsync(prefix, filter, ct).ConfigureAwait(false))!;
     }
 
     public Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default) =>
@@ -377,6 +470,7 @@ public sealed class SqliteArchiveStore : IArchiveStore
             var hId = insertHtml.Parameters.Add("$id", SqliteType.Integer);
             var hH = insertHtml.Parameters.Add("$h", SqliteType.Blob);
 
+            var newIds = new List<long>(pages.Count);
             foreach (var page in pages)
             {
                 cTs.Value = fTs.Value = page.Capture.Timestamp;
@@ -385,6 +479,7 @@ public sealed class SqliteArchiveStore : IArchiveStore
                 cS.Value = page.Capture.StatusCode;
                 insertCapture.ExecuteNonQuery();
                 var id = Convert.ToInt64(findId.ExecuteScalar());
+                newIds.Add(id);
 
                 pId.Value = tId.Value = hId.Value = id;
                 pT.Value = (object?)page.Parsed.Title ?? DBNull.Value;
@@ -399,6 +494,7 @@ public sealed class SqliteArchiveStore : IArchiveStore
             }
 
             tx.Commit();
+            MarkSaved(newIds);
             return 0;
         }, ct);
 
@@ -429,55 +525,26 @@ public sealed class SqliteArchiveStore : IArchiveStore
         return cmd;
     }
 
-    private static SearchSnapshot LoadSnapshot(SqliteConnection conn, long searchId, DateTimeOffset cachedAt)
+    private static CachedSearch LoadCachedSearch(SqliteConnection conn, long searchId, DateTimeOffset cachedAt)
     {
         using var cmd = Cmd(conn, null, """
-            SELECT c.Id, c.CaptureTs, c.Original, c.MimeType, c.StatusCode, (p.CaptureId IS NOT NULL)
+            SELECT c.Id, c.CaptureTs, c.Original, c.MimeType, c.StatusCode
             FROM SearchCaptures sc
             JOIN Captures c ON c.Id = sc.CaptureId
-            LEFT JOIN Pages p ON p.CaptureId = c.Id
             WHERE sc.SearchId = $id
             ORDER BY c.CaptureTs DESC, c.Id DESC
             """);
         cmd.Parameters.AddWithValue("$id", searchId);
 
-        var list = new List<StoredCapture>();
+        var ids = new List<long>();
+        var captures = new List<Capture>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
-            list.Add(new StoredCapture(
-                reader.GetInt64(0),
-                new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)),
-                reader.GetInt64(5) != 0));
+            ids.Add(reader.GetInt64(0));
+            captures.Add(new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)));
         }
-        return new SearchSnapshot(searchId, cachedAt, list);
-    }
-
-    private static IReadOnlyList<StoredCapture> LoadSnapshotPage(SqliteConnection conn, long searchId, int offset, int limit)
-    {
-        using var cmd = Cmd(conn, null, """
-            SELECT c.Id, c.CaptureTs, c.Original, c.MimeType, c.StatusCode, (p.CaptureId IS NOT NULL)
-            FROM SearchCaptures sc
-            JOIN Captures c ON c.Id = sc.CaptureId
-            LEFT JOIN Pages p ON p.CaptureId = c.Id
-            WHERE sc.SearchId = $id
-            ORDER BY c.CaptureTs DESC, c.Id DESC
-            LIMIT $limit OFFSET $offset
-            """);
-        cmd.Parameters.AddWithValue("$id", searchId);
-        cmd.Parameters.AddWithValue("$limit", limit);
-        cmd.Parameters.AddWithValue("$offset", offset);
-
-        var list = new List<StoredCapture>();
-        using var reader = cmd.ExecuteReader();
-        while (reader.Read())
-        {
-            list.Add(new StoredCapture(
-                reader.GetInt64(0),
-                new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)),
-                reader.GetInt64(5) != 0));
-        }
-        return list;
+        return new CachedSearch(searchId, cachedAt, ids.ToArray(), captures.ToArray());
     }
 
     private static BackgroundOperation ReadOperation(SqliteDataReader reader) => new(
