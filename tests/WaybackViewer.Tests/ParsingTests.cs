@@ -88,6 +88,30 @@ public class PageParserTests
     }
 
     [Fact]
+    public void Extracts_generic_engagement_metadata_from_meta_tags()
+    {
+        var page = PageParser.Parse("<meta property='og:site_name' content='Example'><meta name='author' content='Ada'>" +
+            "<meta property='article:published_time' content='2024-01-02T03:04:05Z'><meta name='twitter:views' content='1.2k'>" +
+            "<meta property='og:likes' content='10'><meta name='comment-count' content='3'><meta name='keywords' content='news,tech'>");
+
+        Assert.NotNull(page.Metadata);
+        Assert.Equal(1200, page.Metadata.Views);
+        Assert.Equal(10, page.Metadata.Likes);
+        Assert.Equal(3, page.Metadata.Comments);
+        Assert.Equal("Example", page.Metadata.Source);
+        Assert.Equal("Ada", page.Metadata.Author);
+        Assert.Equal("news,tech", page.Metadata.Tags);
+        Assert.Equal(DateTimeOffset.Parse("2024-01-02T03:04:05Z"), page.Metadata.PublishedAt);
+    }
+
+    [Fact]
+    public void Missing_engagement_metadata_stays_null()
+    {
+        var page = PageParser.Parse("<title>Ordinary page</title><body>Text</body>");
+        Assert.Null(page.Metadata);
+    }
+
+    [Fact]
     public void Meta_attributes_may_come_in_any_order_and_be_unquoted()
     {
         var page = PageParser.Parse("<meta content=Hello name=description><body>x</body>");

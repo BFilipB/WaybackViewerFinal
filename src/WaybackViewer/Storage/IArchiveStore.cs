@@ -22,6 +22,12 @@ public interface IArchiveStore
     /// One saved page, or null. includeHtml=false skips the (large) HTML column.
     Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default);
 
+    /// Best-effort indexed lookup for search-text matches over saved page metadata/body text.
+    Task<IReadOnlyList<long>> MatchCaptureIdsAsync(string query, CancellationToken ct = default);
+
+    /// Popularity metadata for saved pages in a capture search, keyed by timestamp/original URL.
+    Task<IReadOnlyDictionary<string, PageMetadata>> GetPopularityMetadataAsync(string prefix, string filter, CancellationToken ct = default);
+
     /// Inserts or replaces pages in a single round trip. Unknown captures are created on the fly.
     Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default);
 

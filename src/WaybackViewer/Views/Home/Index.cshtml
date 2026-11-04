@@ -6,7 +6,13 @@
     string Qs(int p, string? year, string? cat, string? st, string? sec, string? type = null, bool uniq = false)
     {
         var s = "?url=" + Uri.EscapeDataString(Model.Url) + "&amp;filter=" + Uri.EscapeDataString(Model.Filter)
-            + "&amp;pagination=" + Model.PaginationMode + "&amp;page=" + p + "&amp;pageSize=" + Model.PageSize + "&amp;searchMode=" + Uri.EscapeDataString(Model.SearchMode);
+            + "&amp;pagination=" + Model.PaginationMode + "&amp;page=" + p + "&amp;pageSize=" + Model.PageSize + "&amp;searchMode=" + Uri.EscapeDataString(Model.SearchMode)
+            + "&amp;sort=" + Uri.EscapeDataString(Model.SortMode);
+        if (Model.HasPopularityFilter)
+        {
+            s += "&amp;popularityMetric=" + Uri.EscapeDataString(Model.PopularityMetric);
+            s += "&amp;minPopularity=" + Model.MinPopularity;
+        }
         if (year is not null) s += "&amp;year=" + Uri.EscapeDataString(year);
         if (cat is not null) s += "&amp;category=" + Uri.EscapeDataString(cat);
         if (st is not null) s += "&amp;status=" + Uri.EscapeDataString(st);
@@ -14,6 +20,7 @@
         if (type is not null) s += "&amp;type=" + Uri.EscapeDataString(type);
         if (uniq) s += "&amp;unique=true";
         if (act.Text is not null) s += "&amp;q=" + Uri.EscapeDataString(act.Text);
+        if (Model.DownloadAll) s += "&amp;downloadAll=true";
         return s;
     }
     string PageLink(int p) => Qs(p, act.Year, act.Category, act.Status, act.Section, act.Kind, act.Unique);
@@ -25,30 +32,62 @@
         kind == "type" ? (act.Kind == value ? null : value) : act.Kind,
         act.Unique);
     string ToggleUnique() => Qs(1, act.Year, act.Category, act.Status, act.Section, act.Kind, !act.Unique);
+    string ResetPopularityLink()
+    {
+        var s = Qs(1, act.Year, act.Category, act.Status, act.Section, act.Kind, act.Unique);
+        s = s.Replace("&amp;sort=" + Uri.EscapeDataString(Model.SortMode), "&amp;sort=newest");
+        if (Model.HasPopularityFilter)
+            s = s.Replace("&amp;popularityMetric=" + Uri.EscapeDataString(Model.PopularityMetric) + "&amp;minPopularity=" + Model.MinPopularity, "");
+        return s;
+    }
+    string PresetLink(int value)
+    {
+        var s = Qs(1, act.Year, act.Category, act.Status, act.Section, act.Kind, act.Unique);
+        if (Model.HasPopularityFilter)
+            s = s.Replace("&amp;popularityMetric=" + Uri.EscapeDataString(Model.PopularityMetric) + "&amp;minPopularity=" + Model.MinPopularity, "");
+        return s + "&amp;popularityMetric=" + Uri.EscapeDataString(Model.PopularityMetric) + "&amp;minPopularity=" + value;
+    }
     bool IsOn(string kind, string value) => kind switch { "year" => act.Year == value, "category" => act.Category == value, "status" => act.Status == value, "type" => act.Kind == value, _ => act.Section == value };
 }
 
-<form id="searchBar" method="get" class="bar">
+  <form id="searchBar" method="get" class="bar">
   <input name="url" value="@Model.Url" size="45" placeholder="example.com/blog/  (or paste a web.archive.org link)" />
   <select name="filter">
-    <option value="html200" selected="@(Model.Filter == "html200")">HTML pages, status 200</option>
-    <option value="html" selected="@(Model.Filter == "html")">HTML pages, any status</option>
-    <option value="all" selected="@(Model.Filter == "all")">Everything (incl. images, redirects)</option>
+    <option value="html200" selected="@(Model.Filter == "html200" ? "selected" : null)">HTML pages, status 200</option>
+    <option value="html" selected="@(Model.Filter == "html" ? "selected" : null)">HTML pages, any status</option>
+    <option value="all" selected="@(Model.Filter == "all" ? "selected" : null)">Everything (incl. images, redirects)</option>
   </select>
   <select name="pagination" aria-label="Pagination mode">
-    <option value="server" selected="@(Model.PaginationMode == "server")">Server pagination (recommended)</option>
-    <option value="client" selected="@(Model.PaginationMode == "client")">Client pagination (loads all)</option>
+    <option value="server" selected="selected">Server pagination</option>
   </select>
   <select name="pageSize" aria-label="Captures per page">
     @foreach (var size in new[] { 25, 50, 100, 200 })
     {
-      <option value="@size" selected="@(Model.PageSize == size)">@size per page</option>
+      <option value="@size" selected="@(Model.PageSize == size ? "selected" : null)">@size per page</option>
     }
   </select>
   <select id="searchModeSelect" name="searchMode" aria-label="Search mode">
-    <option value="url" selected="@(Model.SearchMode == "url")">Search URLs</option>
-    <option value="content" selected="@(Model.SearchMode == "content")">Search content</option>
+    <option value="url" selected="@(Model.SearchMode == "url" ? "selected" : null)">Search URLs</option>
+    <option value="content" selected="@(Model.SearchMode == "content" ? "selected" : null)">Search content</option>
   </select>
+  <select name="sort" aria-label="Sort order">
+    <option value="newest" selected="@(Model.SortMode == "newest" ? "selected" : null)">Newest first</option>
+    <option value="popular" selected="@(Model.SortMode == "popular" ? "selected" : null)">Most popular</option>
+    <option value="engaged" selected="@(Model.SortMode == "engaged" ? "selected" : null)">Most engaged</option>
+    <option value="commented" selected="@(Model.SortMode == "commented" ? "selected" : null)">Most commented</option>
+    <option value="liked" selected="@(Model.SortMode == "liked" ? "selected" : null)">Most liked</option>
+    <option value="viewed" selected="@(Model.SortMode == "viewed" ? "selected" : null)">Most viewed</option>
+    <option value="score" selected="@(Model.SortMode == "score" ? "selected" : null)">Highest score</option>
+  </select>
+  <select name="popularityMetric" aria-label="Popularity filter metric">
+    <option value="none" selected="@(Model.PopularityMetric == "none" ? "selected" : null)">No popularity filter</option>
+    <option value="views" selected="@(Model.PopularityMetric == "views" ? "selected" : null)">Min views</option>
+    <option value="likes" selected="@(Model.PopularityMetric == "likes" ? "selected" : null)">Min likes</option>
+    <option value="comments" selected="@(Model.PopularityMetric == "comments" ? "selected" : null)">Min comments</option>
+    <option value="engaged" selected="@(Model.PopularityMetric == "engaged" ? "selected" : null)">Min engagement</option>
+    <option value="score" selected="@(Model.PopularityMetric == "score" ? "selected" : null)">Min score</option>
+  </select>
+  <input type="number" name="minPopularity" min="0" step="1" value="@(Model.MinPopularity ?? 0)" aria-label="Minimum popularity value" placeholder="0" />
   <input id="queryInput" name="q" value="@act.Text" size="28" placeholder="Optional filter keywords" aria-label="Search captures" />
   <button id="applyTextFilter" type="button" title="Apply current search text/mode to the current capture list">Apply filter</button>
   <span id="filterDirtyBadge" class="dirty-indicator" hidden>Unapplied filter changes</span>
@@ -61,7 +100,7 @@
   <div class="activity-head">
     <strong>Background activity</strong>
     <span id="activityImmediate">Ready</span>
-    <span id="activitySelectionInfo" class="activity-selection">0 selected · 0 active</span>
+    <span id="activitySelectionInfo" class="activity-selection">0 selected Â· 0 active</span>
     <button id="selectActiveOps" type="button">Select active</button>
     <button id="clearSelectedOps" type="button">Clear selection</button>
     <button id="pauseWork" type="button">Pause</button>
@@ -100,7 +139,52 @@ else if (Model.CachedAt is not null)
 }
 @if (Model.HiddenNotSaved > 0)
 {
-  <p class="cache-info">Downloading only what this view needs. <a href="@Html.Raw(PageLink(Model.Page) + "&amp;downloadAll=true")">Download the other @Model.HiddenNotSaved pages too</a>.</p>
+  @Html.Raw(PageLink(Model.Page) + (Model.DownloadAll ? "" : "&amp;downloadAll=true"))
+}
+
+@if (Model.Error is null && !string.IsNullOrEmpty(Model.Url) && (Model.SortMode != "newest" || Model.HasPopularityFilter))
+{
+  <p class="cache-info popularity-summary" role="status">
+    @if (Model.SortMode != "newest") { <span>Sorted by <strong>@Model.SortMode</strong>; popularity is read from counts shown on each page (views, comments, likes...) or, failing that, roughly estimated from how big and linked the page is, so it works on any site but is approximate.</span> }
+    @if (Model.HasPopularityFilter) { <span> Showing captures with at least <strong>@Model.MinPopularity</strong> @Model.PopularityMetric (@Model.PopularityExcluded hidden).</span> }
+    <a href="@Html.Raw(ResetPopularityLink())">Reset sort and popularity filter</a>
+  </p>
+}
+@if (Model.Error is null && !string.IsNullOrEmpty(Model.Url) && Model.PopularityMetric != "none" && Model.Presets is { Count: > 0 })
+{
+  <p class="cache-info popularity-presets" role="group" aria-label="Popularity presets">
+    Quick filter:
+    @foreach (var preset in Model.Presets)
+    {
+      <a class="btn@(Model.MinPopularity == preset.Value ? " on" : "")" href="@Html.Raw(PresetLink(preset.Value))" title="Keep captures with at least @preset.Value @Model.PopularityMetric">Top @(preset.Percent)% (&ge; @preset.Value)</a>
+    }
+  </p>
+}
+@if (Model.Error is null && !string.IsNullOrEmpty(Model.Url) && Model.PopularityPending > 0 && (Model.SortMode != "newest" || Model.PopularityMetric != "none"))
+{
+  <p id="popularityPending" class="cache-info popularity-pending" role="status">@Model.PopularityPending pages have no popularity data yet. They are being downloaded in the background and counted as 0 until then; this notice updates when the downloads finish.</p>
+}
+@if (Model.Error is null && !string.IsNullOrEmpty(Model.Url) && Model.PopularityMetric != "none" && Model.Histogram is { Count: > 0 })
+{
+  var peak = Math.Max(1, Model.Histogram.Max());
+  <div class="popularity-histogram" role="img" aria-label="Distribution of @Model.PopularityMetric across captures, lowest to highest">
+    @foreach (var n in Model.Histogram)
+    {
+      <span class="hbar" style="height:@(Math.Max(2, n * 100 / peak))%" title="@n captures"></span>
+    }
+  </div>
+}
+@if (Model.Error is null && !string.IsNullOrEmpty(Model.Url))
+{
+  <p class="cache-info view-tools">
+    <button id="copyViewLink" type="button" class="btn" title="Copy a link to exactly this view">Copy link to this view</button>
+    <button id="saveView" type="button" class="btn" title="Remember this search with its sort and filters">Save this view</button>
+    <span id="savedViews"></span>
+  </p>
+}
+@if (Model.Captures.Count == 0 && Model.HasPopularityFilter)
+{
+  <p class="empty-state">No captures reach @Model.MinPopularity @Model.PopularityMetric. Lower the minimum or reset the filter.@(Model.PopularityPending > 0 ? $" {Model.PopularityPending} pages are still being saved in the background, so try again shortly." : "")</p>
 }
 
 @if (Model.Captures.Count > 0)
@@ -134,7 +218,7 @@ else if (Model.CachedAt is not null)
       }
        @if (Model.Page > 3)
        {
-         <span aria-hidden="true">…</span>
+         <span aria-hidden="true">â€¦</span>
        }
        @for (var pagerPage = Math.Max(1, Model.Page - 2); pagerPage <= Math.Min(Model.TotalPages, Model.Page + 2); pagerPage++)
        {
@@ -149,19 +233,13 @@ else if (Model.CachedAt is not null)
        }
        @if (Model.Page < Model.TotalPages - 2)
        {
-         <span aria-hidden="true">…</span>
+         <span aria-hidden="true">â€¦</span>
        }
        @if (Model.Page < Model.TotalPages)
        {
           <a class="btn" rel="next" aria-label="Next capture page" href="@Html.Raw(PageLink(Model.Page + 1))">Next</a>
           <a class="btn" aria-label="Last capture page" href="@Html.Raw(PageLink(Model.TotalPages))">Last</a>
        }
-    }
-    else
-    {
-      <button id="clientPrev" type="button" aria-label="Previous capture page">Previous</button>
-      <span id="clientPageInfo" tabindex="-1" aria-live="polite" aria-current="page">Page 1</span>
-      <button id="clientNext" type="button" aria-label="Next capture page">Next</button>
     }
   </nav>
 }
@@ -217,6 +295,17 @@ else if (Model.CachedAt is not null)
       <div class="capture-date">@c.Capture.Date.ToString("yyyy-MM-dd HH:mm")</div>
       <div class="url" title="@c.Capture.Original">@c.Capture.Original</div>
       <div class="capture-details"><span class="kind kind-@info.Kind.ToLowerInvariant()">@info.Kind</span> Status @c.Capture.StatusCode &middot; @c.Capture.MimeType@if (folded > 0) { <span class="folded" title="Saved links that show the same thread/post/page and are hidden by 'One per thread / post'"> &middot; +@(folded - 1) more saved links</span> }</div>
+      @if (Model.Popularity is not null && Model.Popularity.TryGetValue(c.Capture.Key, out var pm))
+      {
+        <div class="popularity-badges">
+          @if (pm.Views is { } v) { <span title="Views">&#128065; @v</span> }
+          @if (pm.Likes is { } l) { <span title="Likes">&#128077; @l</span> }
+          @if (pm.Comments is { } cm) { <span title="Comments">&#128172; @cm</span> }
+          @if (pm.Shares is { } sh) { <span title="Shares">&#128257; @sh</span> }
+          @if (pm.Score is { } sc) { <span title="Score">&#11088; @sc</span> }
+          @if (pm.Views is null && pm.Likes is null && pm.Comments is null && pm.Shares is null && pm.Score is null && pm.EffectiveEngagementScore > 0) { <span title="No counts found on this page: rough estimate from how often it was archived and how much sits beneath it, relative to its own site">&asymp; est. @pm.EffectiveEngagementScore</span> }
+        </div>
+      }
       <div class="row">
         <a class="btn" href="@c.Capture.ArchiveUrl" target="_blank" rel="noopener">Open</a>
         <button class="view">View in slideshow</button>
@@ -294,26 +383,6 @@ else if (Model.CachedAt is not null)
     });
   })();
   const paginationMode = '@Model.PaginationMode';
-  const clientPageSize = @Model.PageSize;
-  let clientPage = 1;
-
-  function renderClientPage(announce = false) {
-    if (paginationMode !== 'client' || !byId('clientPageInfo')) return;
-    const totalPages = Math.max(1, Math.ceil(cards.length / clientPageSize));
-    clientPage = Math.min(Math.max(1, clientPage), totalPages);
-    cards.forEach((card, index) => {
-      card.hidden = index < (clientPage - 1) * clientPageSize || index >= clientPage * clientPageSize;
-    });
-    byId('clientPageInfo').textContent = 'Page ' + clientPage + ' of ' + totalPages + ' (' + cards.length + ' captures loaded)';
-    byId('clientPrev').disabled = clientPage === 1;
-    byId('clientNext').disabled = clientPage === totalPages;
-    byId('clientPrev').setAttribute('aria-disabled', clientPage === 1 ? 'true' : 'false');
-    byId('clientNext').setAttribute('aria-disabled', clientPage === totalPages ? 'true' : 'false');
-    if (announce) byId('clientPageInfo').focus({ preventScroll: true });
-  }
-  if (byId('clientPrev')) byId('clientPrev').onclick = () => { clientPage--; renderClientPage(true); };
-  if (byId('clientNext')) byId('clientNext').onclick = () => { clientPage++; renderClientPage(true); };
-  renderClientPage();
 
   document.addEventListener('click', e => {
     if (e.target.matches('.view')) startShow(e.target.closest('.card'));
@@ -698,8 +767,10 @@ else if (Model.CachedAt is not null)
     params.set('url', url);
     params.set('filter', q.get('filter') || searchBar?.querySelector('[name=filter]')?.value || 'html200');
     params.set('searchMode', q.get('searchMode') || searchBar?.querySelector('[name=searchMode]')?.value || 'url');
-    ['year','category','status','section','q','type','unique'].forEach(k => { const v = q.get(k); if (v) params.set(k, v); });
+    ['year','category','status','section','q','type','unique','sort','popularityMetric','minPopularity'].forEach(k => { const v = q.get(k); if (v) params.set(k, v); });
     const r = await fetch('/Home/CaptureSet?' + params.toString());
+
+
     if (!r.ok) throw new Error('Could not load full filtered capture set');
     return await r.json();
   }
@@ -860,6 +931,9 @@ else if (Model.CachedAt is not null)
       pagination: searchBar?.querySelector('[name=pagination]')?.value || 'server',
       pageSize: searchBar?.querySelector('[name=pageSize]')?.value || '50',
       searchMode: searchModeSelect?.value || 'url',
+      sort: searchBar?.querySelector('[name=sort]')?.value || 'newest',
+      popularityMetric: searchBar?.querySelector('[name=popularityMetric]')?.value || 'none',
+      minPopularity: searchBar?.querySelector('[name=minPopularity]')?.value || '0',
       q: queryInput?.value || ''
     };
   }
@@ -871,7 +945,21 @@ else if (Model.CachedAt is not null)
     params.set('pagination', payload.pagination || 'server');
     params.set('pageSize', String(payload.pageSize || 50));
     params.set('searchMode', payload.searchMode || 'url');
+    if ((payload.sort || 'newest') !== 'newest') params.set('sort', payload.sort);
+    if ((payload.popularityMetric || 'none') !== 'none') {
+      params.set('popularityMetric', payload.popularityMetric);
+      const min = Number(payload.minPopularity || 0);
+      if (Number.isFinite(min) && min > 0) params.set('minPopularity', String(min));
+    }
     if ((payload.q || '').trim()) params.set('q', payload.q.trim());
+    // Facets and the download scope belong to the list being viewed: keep them while the same list is re-queried,
+    // drop them when a different URL is searched.
+    const now = new URLSearchParams(location.search);
+    const norm = v => (v || '').trim().toLowerCase().replace(/^https?:\/\//, '');
+    if (norm(now.get('url')) === norm(payload.url) && (now.get('filter') || 'html200') === (payload.filter || 'html200')) {
+      for (const k of ['year', 'category', 'status', 'section', 'type', 'unique', 'downloadAll'])
+        if (now.get(k)) params.set(k, now.get(k));
+    }
     return '/?' + params.toString();
   }
 
@@ -881,9 +969,14 @@ else if (Model.CachedAt is not null)
       url: (s.url || '').trim(),
       filter: s.filter || 'html200',
       searchMode: s.searchMode || 'url',
+      sort: s.sort || 'newest',
+      popularityMetric: s.popularityMetric || 'none',
+      minPopularity: s.minPopularity || '0',
       q: (s.q || '').trim()
     });
   }
+
+
 
   function updateFilterDirtyBadge() {
     if (!filterDirtyBadge) return;
@@ -951,9 +1044,14 @@ else if (Model.CachedAt is not null)
          filter: pendingSearch.filter,
          pagination: pendingSearch.pagination || current.pagination,
          pageSize: pendingSearch.pageSize || current.pageSize,
-         searchMode: pendingSearch.searchMode || current.searchMode,
+         searchMode: current.searchMode || pendingSearch.searchMode,
+         sort: pendingSearch.sort || current.sort,
+         popularityMetric: pendingSearch.popularityMetric || current.popularityMetric,
+         minPopularity: pendingSearch.minPopularity ?? current.minPopularity,
          q: current.q
        });
+
+
        if (pendingSearch.cached) {
          activityImmediate.textContent = 'Capture list already loaded; opening saved results...';
          location.href = target;
@@ -990,7 +1088,7 @@ else if (Model.CachedAt is not null)
   function updateActivityControls(operations) {
     const activeCount = (operations || []).filter(o => isActiveState(o.state)).length;
     const selected = selectedOperationIds().length;
-    if (activitySelectionInfo) activitySelectionInfo.textContent = `${selected} selected · ${activeCount} active`;
+    if (activitySelectionInfo) activitySelectionInfo.textContent = `${selected} selected Â· ${activeCount} active`;
 
     const busy = commandInFlight;
     if (selectActiveOpsBtn) selectActiveOpsBtn.disabled = busy || activeCount === 0;
@@ -1156,4 +1254,71 @@ else if (Model.CachedAt is not null)
       fetch('/Home/Text?ts=' + row.dataset.ts + '&url=' + encodeURIComponent(row.dataset.url)).catch(() => {}));
     (window.requestIdleCallback || (fn => setTimeout(fn, 800)))(go);
   })();
-</script>
+      // 3) Remember the last sort and popularity filter; prefill the controls when a fresh search carries none.
+      (function rememberSortAndFilter() {
+        const form = document.getElementById('searchBar');
+        if (!form) return;
+        const key = 'wb-sort-filter';
+        const fields = ['sort', 'popularityMetric', 'minPopularity'].map(n => form.querySelector('[name=' + n + ']'));
+        if (fields.some(f => !f)) return;
+        const params = new URLSearchParams(location.search);
+        if (!['sort', 'popularityMetric', 'minPopularity'].some(n => params.has(n))) {
+          try {
+            const saved = JSON.parse(localStorage.getItem(key) || 'null');
+            if (saved) { fields[0].value = saved.sort || fields[0].value; fields[1].value = saved.popularityMetric || fields[1].value; fields[2].value = saved.minPopularity || fields[2].value; }
+          } catch { }
+        }
+        form.addEventListener('submit', () => {
+          try { localStorage.setItem(key, JSON.stringify({ sort: fields[0].value, popularityMetric: fields[1].value, minPopularity: fields[2].value })); } catch { }
+        });
+      })();
+      // 4) Pending popularity data: follow the background downloads and offer a reload when they finish.
+      (function livePending() {
+        const note = document.getElementById('popularityPending');
+        if (!note) return;
+        let seenRunning = false, ticks = 0;
+        async function tick() {
+          ticks++;
+          try {
+            const p = await (await fetch('/Home/PreloadStatus')).json();
+            if (p.running) { seenRunning = true; note.textContent = 'Downloading popularity data: ' + p.completed + ' / ' + p.total + ' saved so far...'; }
+            if (!p.running && (seenRunning || ticks > 3)) {
+              note.textContent = '';
+              const a = document.createElement('a');
+              a.href = location.href; a.textContent = 'Downloads finished - reload to update the results';
+              note.appendChild(a); return;
+            }
+          } catch { }
+          if (ticks < 600) setTimeout(tick, 1500);
+        }
+        setTimeout(tick, 1500);
+      })();
+      // 5) Copy a link to this view; save and recall named views.
+      (function viewTools() {
+        const copy = document.getElementById('copyViewLink'), save = document.getElementById('saveView'), box = document.getElementById('savedViews');
+        if (!copy || !save || !box) return;
+        const key = 'wb-saved-views';
+        const load = () => { try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch { return []; } };
+        copy.onclick = async () => {
+          try { await navigator.clipboard.writeText(location.href); copy.textContent = 'Link copied'; } catch { copy.textContent = 'Copy failed'; }
+          setTimeout(() => copy.textContent = 'Copy link to this view', 1800);
+        };
+        function render() {
+          box.textContent = '';
+          load().forEach((v, i) => {
+            const a = document.createElement('a'); a.className = 'btn'; a.href = v.href; a.textContent = v.name;
+            const x = document.createElement('button'); x.type = 'button'; x.className = 'btn'; x.textContent = 'x'; x.title = 'Remove saved view ' + v.name;
+            x.onclick = () => { const all = load(); all.splice(i, 1); localStorage.setItem(key, JSON.stringify(all)); render(); };
+            box.append(a, x);
+          });
+        }
+        save.onclick = () => {
+          const name = prompt('Name for this view:', document.title.slice(0, 40));
+          if (!name) return;
+          const all = load().filter(v => v.name !== name); all.push({ name, href: location.pathname + location.search });
+          try { localStorage.setItem(key, JSON.stringify(all.slice(-12))); } catch { }
+          render();
+        };
+        render();
+      })();
+    </script>

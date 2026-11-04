@@ -14,6 +14,7 @@ public sealed class InMemoryArchiveStore : IArchiveStore
     private readonly Dictionary<long, Capture> captures = new();
     private readonly Dictionary<long, StoredPage> pages = new();
     private readonly Dictionary<string, (long Id, DateTimeOffset CachedAt, List<long> CaptureIds)> searches = new(StringComparer.Ordinal);
+    private readonly Dictionary<long, string> captureSearchText = new();
     private readonly Dictionary<string, BackgroundOperation> operations = new(StringComparer.Ordinal);
     private readonly List<int> saveBatchSizes = new();
 
@@ -34,6 +35,23 @@ public sealed class InMemoryArchiveStore : IArchiveStore
             return Task.FromResult(searches.TryGetValue(SearchKey(prefix, filter), out var s)
                 ? BuildSnapshot(s.Id, s.CachedAt, s.CaptureIds)
                 : null);
+        }
+    }
+
+    public Task<IReadOnlyDictionary<string, PageMetadata>> GetPopularityMetadataAsync(string prefix, string filter, CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            if (!searches.TryGetValue(SearchKey(prefix, filter), out var search))
+                return Task.FromResult<IReadOnlyDictionary<string, PageMetadata>>(new Dictionary<string, PageMetadata>(StringComparer.Ordinal));
+
+            var result = search.CaptureIds
+                .Where(pages.ContainsKey)
+                .Select(id => pages[id])
+                .Where(page => page.Parsed.Metadata is not null)
+                .ToDictionary(page => page.Capture.Key, page => page.Parsed.Metadata!, StringComparer.Ordinal);
+
+            return Task.FromResult<IReadOnlyDictionary<string, PageMetadata>>(result);
         }
     }
 
@@ -85,8 +103,27 @@ public sealed class InMemoryArchiveStore : IArchiveStore
                 return Task.FromResult<StoredPage?>(null);
             if (!includeHtml) return Task.FromResult<StoredPage?>(page with { HtmlGz = null });
 
-            var html = htmlFiles.LoadAsync(page.Capture, ct).GetAwaiter().GetResult() ?? page.HtmlGz;
+            var html = page.HtmlGz ?? htmlFiles.LoadAsync(page.Capture, ct).GetAwaiter().GetResult();
             return Task.FromResult<StoredPage?>(page with { HtmlGz = html });
+        }
+    }
+
+    public Task<IReadOnlyList<long>> MatchCaptureIdsAsync(string query, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return Task.FromResult<IReadOnlyList<long>>(Array.Empty<long>());
+        var tokens = SearchTextMatcher.IndexTokens(query);
+        if (tokens.Count == 0) return Task.FromResult<IReadOnlyList<long>>(Array.Empty<long>());
+
+        lock (gate)
+        {
+            var ids = new List<long>();
+            foreach (var (captureId, text) in captureSearchText)
+            {
+                var hay = text;
+                var matches = tokens.All(token => hay.Contains(token, StringComparison.Ordinal));
+                if (matches) ids.Add(captureId);
+            }
+            return Task.FromResult<IReadOnlyList<long>>(ids);
         }
     }
 
@@ -98,8 +135,10 @@ public sealed class InMemoryArchiveStore : IArchiveStore
             foreach (var p in newPages)
             {
                 var id = EnsureCapture(p.Capture);
+                var searchText = SearchTextMatcher.BuildIndexText(p.Capture.Original, p.Parsed.Title, p.Parsed.Description, p.Parsed.Text);
+                captureSearchText[id] = searchText;
                 htmlFiles.SaveAsync(p.Capture, p.HtmlGz, ct).GetAwaiter().GetResult();
-                pages[id] = new StoredPage(captures[id], null, p.Parsed, p.FetchedAt);
+                pages[id] = new StoredPage(captures[id], p.HtmlGz, p.Parsed, p.FetchedAt);
             }
         }
         return Task.CompletedTask;

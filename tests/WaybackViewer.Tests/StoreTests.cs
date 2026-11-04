@@ -13,7 +13,7 @@ public static class StoreScenarios
         nameof(InitializeIsIdempotent), nameof(UnknownSearchIsNull), nameof(SearchRoundTripsNewestFirst),
         nameof(ResavingReplacesMembershipButKeepsPages), nameof(FiltersAreIndependent), nameof(ReadyFlagFollowsSavedPages),
         nameof(PageWithAndWithoutHtml), nameof(UnknownPageIsNull), nameof(SavingAPageTwiceOverwrites),
-        nameof(DuplicatesInOneSaveAreStoredOnce), nameof(SavingUnknownCaptureCreatesIt), nameof(UnicodeAndVeryLongUrls),
+        nameof(DuplicatesInOneSaveAreStoredOnce), nameof(SavingUnknownCaptureCreatesIt), nameof(UnicodeAndVeryLongUrls), nameof(MetadataRoundTrips),
         nameof(LargeSearchRoundTrip), nameof(PagedSearchRetrieval), nameof(ConcurrentSavesDoNotCollide)
     ];
 
@@ -21,6 +21,17 @@ public static class StoreScenarios
 
     private static NewPage Page(Capture c, string title = "T", string text = "body") =>
         new(c, HtmlCodec.Compress($"<title>{title}</title><p>{text}</p>"), new ParsedPage(title, "desc", text), DateTimeOffset.UtcNow);
+
+    public static async Task MetadataRoundTrips(IArchiveStore store)
+    {
+        var capture = Cap(Unique(), 7);
+        var metadata = new PageMetadata(Views: 1200, Likes: 10, Comments: 3, Source: "Example", Author: "Ada", Confidence: 0.6);
+        var page = new NewPage(capture, HtmlCodec.Compress("<p>body</p>"), new ParsedPage("T", "desc", "body", metadata), DateTimeOffset.UtcNow);
+        await store.SavePagesAsync([page]);
+
+        var loaded = await store.GetPageAsync(capture.Timestamp, capture.Original, false);
+        Assert.Equal(metadata, loaded!.Parsed.Metadata);
+    }
 
     private static Capture Cap(string tag, int i, string mime = "text/html") =>
         new(new DateTime(2021, 1, 1).AddMinutes(i).ToString("yyyyMMddHHmmss"), $"https://{tag}.example/p{i}", mime, "200");
@@ -225,6 +236,7 @@ public class InMemoryArchiveStoreTests
     [InlineData(nameof(StoreScenarios.DuplicatesInOneSaveAreStoredOnce))]
     [InlineData(nameof(StoreScenarios.SavingUnknownCaptureCreatesIt))]
     [InlineData(nameof(StoreScenarios.UnicodeAndVeryLongUrls))]
+    [InlineData(nameof(StoreScenarios.MetadataRoundTrips))]
     [InlineData(nameof(StoreScenarios.LargeSearchRoundTrip))]
     [InlineData(nameof(StoreScenarios.PagedSearchRetrieval))]
     [InlineData(nameof(StoreScenarios.ConcurrentSavesDoNotCollide))]
@@ -232,7 +244,7 @@ public class InMemoryArchiveStoreTests
 
     [Fact]
     public void Every_scenario_is_covered_by_the_theory() =>
-        Assert.Equal(15, StoreScenarios.Names.Length);
+        Assert.Equal(16, StoreScenarios.Names.Length);
 }
 
 public class ArchiveStoreContractTests
@@ -293,6 +305,7 @@ public class SqliteArchiveStoreTests : IDisposable
     [InlineData(nameof(StoreScenarios.DuplicatesInOneSaveAreStoredOnce))]
     [InlineData(nameof(StoreScenarios.SavingUnknownCaptureCreatesIt))]
     [InlineData(nameof(StoreScenarios.UnicodeAndVeryLongUrls))]
+    [InlineData(nameof(StoreScenarios.MetadataRoundTrips))]
     [InlineData(nameof(StoreScenarios.LargeSearchRoundTrip))]
      [InlineData(nameof(StoreScenarios.PagedSearchRetrieval))]
     [InlineData(nameof(StoreScenarios.ConcurrentSavesDoNotCollide))]

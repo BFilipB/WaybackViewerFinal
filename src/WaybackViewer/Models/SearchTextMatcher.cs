@@ -7,6 +7,25 @@ public static class SearchTextMatcher
 {
     public static string CacheKey(string query) => Normalize(query);
 
+    public static string BuildIndexText(params string?[] values)
+    {
+        var parts = values
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .SelectMany(v => Normalize(v).Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        return string.Join(' ', parts);
+    }
+
+    public static IReadOnlyList<string> IndexTokens(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) return Array.Empty<string>();
+        return Normalize(query)
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
+
     public static bool Matches(string query, string? value)
     {
         if (string.IsNullOrWhiteSpace(query)) return true;

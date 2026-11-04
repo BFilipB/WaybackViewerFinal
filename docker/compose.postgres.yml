@@ -1,0 +1,27 @@
+# Adds a PostgreSQL container and points the app at it:
+#   docker compose -f docker-compose.yml -f docker/compose.postgres.yml up --build
+# Change the password before using this anywhere but your own machine.
+services:
+  db:
+	image: postgres:16
+	environment:
+	  POSTGRES_USER: wayback
+	  POSTGRES_PASSWORD: change-me
+	  POSTGRES_DB: wayback
+	volumes:
+	  - pg-data:/var/lib/postgresql/data
+	healthcheck:
+	  test: ["CMD-SHELL", "pg_isready -U wayback"]
+	  interval: 5s
+	  retries: 10
+
+  wayback:
+	depends_on:
+	  db:
+		condition: service_healthy
+	environment:
+	  Storage__Provider: Postgres
+	  ConnectionStrings__WaybackDb: Host=db;Database=wayback;Username=wayback;Password=change-me
+
+volumes:
+  pg-data:

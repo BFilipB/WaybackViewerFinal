@@ -383,6 +383,23 @@ public class PageServiceTests
     }
 
     [Fact]
+    public async Task Popularity_metadata_is_recovered_from_previously_saved_html()
+    {
+        var (service, store, loader, _) = Create();
+        var capture = SampleData.Capture(4);
+        var html = "<html><head><meta property=\"og:likes\" content=\"27\"></head><body>saved</body></html>";
+        await store.SaveSearchAsync("example.com/", "html200", [capture], DateTimeOffset.UtcNow);
+        await store.SavePagesAsync([new NewPage(capture, HtmlCodec.Compress(html), new ParsedPage("Saved", null, "saved"), DateTimeOffset.UtcNow)]);
+
+        var metadata = await service.GetPopularityMetadataAsync(capture.Timestamp, capture.Original);
+        var persisted = await store.GetPopularityMetadataAsync("example.com/", "html200");
+
+        Assert.Equal(27, metadata?.Likes);
+        Assert.Equal(27, persisted[capture.Key].Likes);
+        Assert.Empty(loader.Started);
+    }
+
+    [Fact]
     public async Task Missing_pages_are_downloaded_once_and_saved()
     {
         var (service, store, loader, _) = Create();

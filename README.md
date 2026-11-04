@@ -107,6 +107,124 @@ If omitted, provider-specific defaults are used.
 
 ---
 
+## 3b) Guides
+
+### Your first search
+
+1. Start the app and open it in the browser.
+2. Enter a site or prefix, for example `example.com/` (a pasted Wayback URL also works).
+3. Choose a filter: `html200` (default), `html`, or `all`, then submit.
+4. The capture list loads in the background; progress bars show **Capture list** and **Page preload**.
+5. The list is saved. Searching the same site again is instant until it is older than `Storage:SearchMaxAgeDays` (30 days).
+
+### Find the most popular pages
+
+1. Pick a **Popularity metric** (views, likes, shares, comments, score) and a **Sort** mode.
+2. Use the **Top 10 / 25 / 50** presets or a minimum value; the histogram shows the distribution.
+3. Pages not downloaded yet count as 0; a live notice shows how many are pending and offers a reload link when done.
+4. Exports (`Home/CaptureSet`) honor the same sort/filter. Example: `/?url=example.com/&sort=liked&popularityMetric=likes&minPopularity=15`
+
+### Themes, layouts, shortcuts, saved views
+
+- Four layouts and ten themes; `Alt+T` / `Alt+L` cycle them (add `Shift` to go backwards). Choices persist in browser localStorage.
+- **Copy link to this view** copies a URL with the exact search/sort/filters.
+- **Save this view** stores a named view in your browser only.
+
+---
+
+## 3c) Databases and adaptability
+
+Storage goes through one interface (`IArchiveStore`) and a named factory (`IArchiveStoreProvider`) chosen by `Storage:Provider`.
+
+| Provider | Status | Needs |
+|---|---|---|
+| `Sqlite` (default) | Bundled, tested locally and in CI | Nothing |
+| `Memory` | Bundled, tested | Nothing (data lost on exit) |
+| `Postgres` | Bundled. The shared store scenarios run against a real PostgreSQL **in GitHub CI** | A PostgreSQL server |
+| `SqlServer`, `MySql`, `MariaDb`, `Oracle` | Not bundled; add a dialect class (about 60 lines) | Driver package |
+
+**How it adapts:** `SqlArchiveStore` is one store for every relational database (ADO.NET). A small `SqlDialect` class supplies what differs: connection, table definitions and upsert / insert-ignore SQL. Shipped dialects: `SqliteDialect`, `PostgresDialect`. NoSQL databases are out of scope.
+
+Switch database with two settings (environment variables use `__` instead of `:`; the same keys work in `appsettings.json`):
+
+```powershell
+$env:Storage__Provider = "Postgres"
+$env:ConnectionStrings__WaybackDb = "Host=localhost;Database=wayback;Username=wayback;Password=secret"
+```
+
+The schema is created automatically at startup. To add another database: derive from `SqlDialect`, add a provider, register it in `AppBuilder`, and add a test class that runs `StoreScenarios`. Details: **[docs/DATABASES.md](./docs/DATABASES.md)**.
+
+PostgreSQL has not been run on the author's machine; it is verified by the CI workflow. Treat it as unverified until your CI run is green.
+
+## 3d) Docker
+
+```bash
+docker compose up --build                                                         # SQLite, http://localhost:8080
+docker compose -f docker-compose.yml -f docker/compose.postgres.yml up --build   # PostgreSQL + app
+docker compose down                                                               # stop, keep data
+docker compose down -v                                                            # stop and delete data
+```
+
+Files: `Dockerfile` (multi-stage, non-root), `docker-compose.yml` (SQLite volume), `docker/compose.postgres.yml` (adds a PostgreSQL container; change its password for real use). Settings are environment variables (`Storage__Provider`, `ConnectionStrings__WaybackDb`, `Storage__HtmlRoot`). Data lives in `/data`.
+
+## 3e) Testing, CI and CD
+
+### What the tests cover
+
+| Kind | Where | What |
+|---|---|---|
+| Unit | `tests/WaybackViewer.Tests/*` | URL input, CDX parsing, facets, text matching, codecs, parsers, scheduler, preload coordinator |
+| Store contract | `StoreTests.cs`, `GenericSqlStoreTests.cs` | Identical behavior scenarios for SQLite, generic SQL on SQLite, in-memory, and PostgreSQL (CI) |
+| Integration | `IntegrationTests.cs`, `FilterIntegrationTests.cs`, `FacetTests.cs` | The real app with a fake archive: every sort, popularity metric, filter, paging mode, export and their combinations |
+| Browser | `BrowserTests.cs` | Playwright/Chromium. **Skipped locally** unless Chromium is installed; run in CI |
+| Load / stress | `scripts/Test-LoadAndSmoke.ps1` | Concurrent mixed traffic, invalid-input stress, p95 latency budget |
+| Repository health | `scripts/Test-Integrity.ps1` | Quick structural checks |
+
+```powershell
+dotnet test                                                        # everything runnable locally
+dotnet test --filter "FullyQualifiedName~FilterIntegrationTests"   # one area
+./scripts/Test-LoadAndSmoke.ps1                                    # load/stress (Windows PowerShell)
+```
+
+No test touches the internet.
+
+### CI/CD workflow guide (GitHub Actions, nothing to install locally)
+
+`.github/workflows/ci.yml` runs on every push and pull request. Open the **Actions** tab of your repository to follow it.
+
+| Job | Runs on | Does |
+|---|---|---|
+| `test` | Ubuntu | Builds, installs Chromium, starts a PostgreSQL service container, runs **all** tests (browser and PostgreSQL included) |
+| `docker` | Ubuntu | Builds the image, starts compose with SQLite, waits for `/healthz`, checks the home page |
+| `docker-postgres` | Ubuntu | Same, with the PostgreSQL compose override |
+| `load` | Windows | Runs `Test-LoadAndSmoke.ps1` |
+
+**Using it, step by step**
+1. Push to GitHub (`git push`). The workflow starts automatically; there is nothing to enable.
+2. Open **Actions**, choose the latest run, click a job to see its log. Green check = passed.
+3. A red job: open it, expand the failed step, read the first error, fix, push again.
+4. To re-run without a new commit: open the run and choose **Re-run all jobs**.
+5. To protect `main`: repository **Settings > Branches > Add rule**, and require the checks above before merging.
+
+**Deploying (CD).** The workflow tests and builds the image but does not publish it, because that needs your registry and secrets. To publish to GitHub Container Registry, add a job after `docker` that logs in with `docker/login-action` using `GITHUB_TOKEN` and pushes with `docker/build-push-action`; then run the image anywhere with the environment variables from section 3d.
+
+## 3f) Filters, sorting and how they combine
+
+Everything in the URL composes: search mode and text, capture-type filter, facets (year, category, status, section, type, threads), sort, popularity metric and minimum, page and page size. Pager, facet, sort, export, copy-link and saved-view links all carry the full set, including content-search mode and the "download everything" choice. Searching a **different** URL starts fresh; re-applying the same list keeps its facets. Export (`/Home/CaptureSet`) applies the same filters and sort as the page being viewed. Invalid input keeps your sort and popularity selection.
+
+## 3g) Troubleshooting
+
+- **`Storage:Provider 'X' is not bundled`**: use `Sqlite`, `Memory` or `Postgres`, or add a dialect (docs/DATABASES.md).
+- **Popularity shows 0**: pages are not downloaded yet; wait for preload or set `Preload:Scope` to `all`.
+Saved pages are re-scored from stored HTML without downloading again. Captures with no page data yet fall back to archive-only signals (how often the URL was captured, and how many captured URLs sit beneath it), so every capture has a score immediately and a minimum never hides everything. These fallback scores are ranked as a percentile (1-100) within each site and shown in the list as "est.".
+- **Where is my data?** `%LOCALAPPDATA%\WaybackViewer\` on Windows, `/data` in Docker.
+- **Slow / HTTP 429 from the archive**: the client backs off automatically; lower `Archive:MaxConcurrency`.
+- **Port in use**: `dotnet run --project src/WaybackViewer --urls http://localhost:5090`
+- **Themes do not stick**: they live in localStorage; private windows or cleared data reset them.
+- **Browser tests skipped**: expected locally; they run in CI.
+
+---
+
 ## 4) Project layout
 
 ```text
@@ -133,9 +251,7 @@ tests/WaybackViewer.Tests/
   - `html200`
   - `html`
   - `all`
-- **Pagination mode**:
-  - `server` (recommended)
-  - `client`
+- **Pagination**: always server-side; only one page of rows is rendered. Old `pagination=client` links still work and are served as server pages.
 - **Page size**: 25/50/100/200
 - **Search mode**:
   - `Search URLs`
@@ -204,8 +320,8 @@ Notes:
 - Search matching is tolerant (not overly literal):
   - case-insensitive
   - punctuation/extra-space tolerant token matching
-  - diacritic-insensitive (for example `café` ~= `cafe`)
-  - basic Cyrillic/Latin equivalence (`zdravo` ~= `здраво`, `njegos` ~= `његош`)
+  - diacritic-insensitive (for example `cafÃ©` ~= `cafe`)
+  - basic Cyrillic/Latin equivalence (`zdravo` ~= `ÃÂ·ÃÂ´Ã‘â‚¬ÃÂ°ÃÂ²ÃÂ¾`, `njegos` ~= `Ã‘Å¡ÃÂµÃÂ³ÃÂ¾Ã‘Ë†`)
 
 ---
 
@@ -226,7 +342,7 @@ Capture loading/refresh and preload are independent workflows and can be control
 UI interaction details:
 
 - Timeline selection is stable across polling refreshes.
-- Header shows operation summary (`X selected · Y active`).
+- Header shows operation summary (`X selected Â· Y active`).
 - Bulk controls (`Pause`/`Resume`/`Stop`) and row controls use busy states to prevent accidental duplicate clicks.
 - Background operation commands are grouped and refreshed coherently to reduce flicker.
 
@@ -253,7 +369,7 @@ UI interaction details:
 
 ### `Storage`
 
-- `Provider` (`Sqlite` or `Memory`)
+- `Provider` (`Sqlite`, `Memory`, or a provider you register; see docs/DATABASES.md)
 - `SearchMaxAgeDays`
 - `HtmlRoot`
 

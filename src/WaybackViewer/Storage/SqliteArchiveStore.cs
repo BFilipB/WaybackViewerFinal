@@ -9,7 +9,7 @@ namespace WaybackViewer.Storage;
 /// what makes saving thousands of rows take milliseconds instead of seconds.
 public sealed class SqliteArchiveStore : IArchiveStore
 {
-    private static readonly string[] SchemaStatements =
+    internal static readonly string[] SchemaStatements =
     [
         """
         CREATE TABLE IF NOT EXISTS Captures (
@@ -44,6 +44,9 @@ public sealed class SqliteArchiveStore : IArchiveStore
             FetchedAtUtc INTEGER NOT NULL)
         """,
         "CREATE TABLE IF NOT EXISTS PageText (CaptureId INTEGER PRIMARY KEY, Body TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS PageMetadata (CaptureId INTEGER PRIMARY KEY, Views INTEGER, Likes INTEGER, Shares INTEGER, Comments INTEGER, Score INTEGER, EngagementScore INTEGER, Source TEXT, Author TEXT, PublishedAtUtc INTEGER, Tags TEXT, Confidence REAL)",
+        "CREATE TABLE IF NOT EXISTS CaptureSearch (CaptureId INTEGER PRIMARY KEY, SearchText TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS IX_CaptureSearch_SearchText ON CaptureSearch(SearchText)",
         "CREATE TABLE IF NOT EXISTS PageHtml (CaptureId INTEGER PRIMARY KEY, HtmlGz BLOB NOT NULL)",
         """
         CREATE TABLE IF NOT EXISTS Operations (
@@ -90,6 +93,42 @@ public sealed class SqliteArchiveStore : IArchiveStore
         public long ComposedVersion = -1;
         public long LastUsed;
     }
+
+    public Task<IReadOnlyDictionary<string, PageMetadata>> GetPopularityMetadataAsync(string prefix, string filter, CancellationToken ct = default) =>
+        Task.Run<IReadOnlyDictionary<string, PageMetadata>>(() =>
+        {
+            using var conn = Open();
+            using var cmd = Cmd(conn, null, """
+                SELECT c.CaptureTs, c.Original, m.Views, m.Likes, m.Shares, m.Comments, m.Score, m.EngagementScore,
+                       m.Source, m.Author, m.PublishedAtUtc, m.Tags, m.Confidence
+                FROM Searches s
+                JOIN SearchCaptures sc ON sc.SearchId = s.Id
+                JOIN Captures c ON c.Id = sc.CaptureId
+                JOIN PageMetadata m ON m.CaptureId = c.Id
+                WHERE s.UrlPrefix = $p AND s.Filter = $f
+                """);
+            cmd.Parameters.AddWithValue("$p", prefix);
+            cmd.Parameters.AddWithValue("$f", filter);
+            using var reader = cmd.ExecuteReader();
+            var result = new Dictionary<string, PageMetadata>(StringComparer.Ordinal);
+            while (reader.Read())
+            {
+                var key = $"{reader.GetString(0)}|{reader.GetString(1)}";
+                result[key] = new PageMetadata(
+                    reader.IsDBNull(2) ? null : reader.GetInt64(2),
+                    reader.IsDBNull(3) ? null : reader.GetInt64(3),
+                    reader.IsDBNull(4) ? null : reader.GetInt64(4),
+                    reader.IsDBNull(5) ? null : reader.GetInt64(5),
+                    reader.IsDBNull(6) ? null : reader.GetInt64(6),
+                    reader.IsDBNull(7) ? null : reader.GetInt64(7),
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9),
+                    reader.IsDBNull(10) ? null : DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(10)),
+                    reader.IsDBNull(11) ? null : reader.GetString(11),
+                    reader.IsDBNull(12) ? 0 : reader.GetDouble(12));
+            }
+            return result;
+        }, ct);
 
     private static string CacheKey(string prefix, string filter) => filter + "|" + prefix;
 
@@ -398,17 +437,44 @@ public sealed class SqliteArchiveStore : IArchiveStore
         return (await GetCachedSnapshotAsync(prefix, filter, ct).ConfigureAwait(false))!;
     }
 
+    public async Task<IReadOnlyList<long>> MatchCaptureIdsAsync(string query, CancellationToken ct = default)
+    {
+        var tokens = SearchTextMatcher.IndexTokens(query);
+        if (tokens.Count == 0) return Array.Empty<long>();
+
+        return await Task.Run(() =>
+        {
+            using var conn = Open();
+            var conditions = new List<string>();
+            for (var i = 0; i < tokens.Count; i++)
+            {
+                conditions.Add("SearchText LIKE '%' || $t" + i + " || '%'");
+            }
+
+            using var cmd = Cmd(conn, null, "SELECT CaptureId FROM CaptureSearch WHERE " + string.Join(" AND ", conditions));
+            for (var i = 0; i < tokens.Count; i++)
+                cmd.Parameters.AddWithValue("$t" + i, tokens[i]);
+
+            var ids = new List<long>();
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read()) ids.Add(reader.GetInt64(0));
+            return (IReadOnlyList<long>)ids;
+        }, ct).ConfigureAwait(false);
+    }
+
     public Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default) =>
         Task.Run(() =>
         {
             using var conn = Open();
             var sql = """
-                SELECT c.CaptureTs, c.Original, c.MimeType, c.StatusCode, p.Title, p.Description, t.Body, p.FetchedAtUtc
+                SELECT c.CaptureTs, c.Original, c.MimeType, c.StatusCode, p.Title, p.Description, t.Body, p.FetchedAtUtc,
+                       m.Views, m.Likes, m.Shares, m.Comments, m.Score, m.EngagementScore, m.Source, m.Author, m.PublishedAtUtc, m.Tags, m.Confidence
                 """ + (includeHtml ? ", h.HtmlGz" : "") + """
 
                 FROM Captures c
                 JOIN Pages p ON p.CaptureId = c.Id
                 JOIN PageText t ON t.CaptureId = c.Id
+                LEFT JOIN PageMetadata m ON m.CaptureId = c.Id
                 """ + (includeHtml ? "\nJOIN PageHtml h ON h.CaptureId = c.Id" : "") + """
 
                 WHERE c.CaptureTs = $ts AND c.Original = $o
@@ -423,15 +489,27 @@ public sealed class SqliteArchiveStore : IArchiveStore
             var parsed = new ParsedPage(
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.GetString(6));
+                reader.GetString(6),
+                reader.IsDBNull(8) ? null : new PageMetadata(
+                    reader.IsDBNull(8) ? null : reader.GetInt64(8),
+                    reader.IsDBNull(9) ? null : reader.GetInt64(9),
+                    reader.IsDBNull(10) ? null : reader.GetInt64(10),
+                    reader.IsDBNull(11) ? null : reader.GetInt64(11),
+                    reader.IsDBNull(12) ? null : reader.GetInt64(12),
+                    reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                    reader.IsDBNull(14) ? null : reader.GetString(14),
+                    reader.IsDBNull(15) ? null : reader.GetString(15),
+                    reader.IsDBNull(16) ? null : DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(16)),
+                    reader.IsDBNull(17) ? null : reader.GetString(17),
+                    reader.IsDBNull(18) ? 0 : reader.GetDouble(18)));
             var fetchedAt = DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(7));
             byte[]? html = null;
             if (includeHtml)
             {
                 html = htmlFiles.LoadAsync(capture, ct).GetAwaiter().GetResult();
-                if (html is null && !reader.IsDBNull(8))
+                if (html is null && !reader.IsDBNull(19))
                 {
-                    var legacy = reader.GetFieldValue<byte[]>(8);
+                    var legacy = reader.GetFieldValue<byte[]>(19);
                     if (legacy.Length > 0) html = legacy;
                 }
             }
@@ -466,6 +544,24 @@ public sealed class SqliteArchiveStore : IArchiveStore
             var tId = insertText.Parameters.Add("$id", SqliteType.Integer);
             var tB = insertText.Parameters.Add("$b", SqliteType.Text);
 
+            using var upsertMetadata = Cmd(conn, tx, "INSERT OR REPLACE INTO PageMetadata (CaptureId, Views, Likes, Shares, Comments, Score, EngagementScore, Source, Author, PublishedAtUtc, Tags, Confidence) VALUES ($id, $views, $likes, $shares, $comments, $score, $engagement, $source, $author, $published, $tags, $confidence)");
+            var mId = upsertMetadata.Parameters.Add("$id", SqliteType.Integer);
+            var mViews = upsertMetadata.Parameters.Add("$views", SqliteType.Integer);
+            var mLikes = upsertMetadata.Parameters.Add("$likes", SqliteType.Integer);
+            var mShares = upsertMetadata.Parameters.Add("$shares", SqliteType.Integer);
+            var mComments = upsertMetadata.Parameters.Add("$comments", SqliteType.Integer);
+            var mScore = upsertMetadata.Parameters.Add("$score", SqliteType.Integer);
+            var mEngagement = upsertMetadata.Parameters.Add("$engagement", SqliteType.Integer);
+            var mSource = upsertMetadata.Parameters.Add("$source", SqliteType.Text);
+            var mAuthor = upsertMetadata.Parameters.Add("$author", SqliteType.Text);
+            var mPublished = upsertMetadata.Parameters.Add("$published", SqliteType.Integer);
+            var mTags = upsertMetadata.Parameters.Add("$tags", SqliteType.Text);
+            var mConfidence = upsertMetadata.Parameters.Add("$confidence", SqliteType.Real);
+
+            using var upsertIndex = Cmd(conn, tx, "INSERT OR REPLACE INTO CaptureSearch (CaptureId, SearchText) VALUES ($id, $s)");
+            var sId = upsertIndex.Parameters.Add("$id", SqliteType.Integer);
+            var sText = upsertIndex.Parameters.Add("$s", SqliteType.Text);
+
             using var insertHtml = Cmd(conn, tx, "INSERT OR REPLACE INTO PageHtml (CaptureId, HtmlGz) VALUES ($id, $h)");
             var hId = insertHtml.Parameters.Add("$id", SqliteType.Integer);
             var hH = insertHtml.Parameters.Add("$h", SqliteType.Blob);
@@ -481,15 +577,36 @@ public sealed class SqliteArchiveStore : IArchiveStore
                 var id = Convert.ToInt64(findId.ExecuteScalar());
                 newIds.Add(id);
 
-                pId.Value = tId.Value = hId.Value = id;
+                pId.Value = tId.Value = hId.Value = sId.Value = mId.Value = id;
                 pT.Value = (object?)page.Parsed.Title ?? DBNull.Value;
                 pD.Value = (object?)page.Parsed.Description ?? DBNull.Value;
                 pAt.Value = page.FetchedAt.ToUnixTimeMilliseconds();
                 tB.Value = page.Parsed.Text;
+                sText.Value = SearchTextMatcher.BuildIndexText(page.Capture.Original, page.Parsed.Title, page.Parsed.Description, page.Parsed.Text);
+                var metadata = page.Parsed.Metadata;
+                mViews.Value = DbValue(metadata?.Views);
+                mLikes.Value = DbValue(metadata?.Likes);
+                mShares.Value = DbValue(metadata?.Shares);
+                mComments.Value = DbValue(metadata?.Comments);
+                mScore.Value = DbValue(metadata?.Score);
+                mEngagement.Value = DbValue(metadata?.EngagementScore);
+                mSource.Value = (object?)metadata?.Source ?? DBNull.Value;
+                mAuthor.Value = (object?)metadata?.Author ?? DBNull.Value;
+                mPublished.Value = metadata?.PublishedAt?.ToUnixTimeMilliseconds() is long published ? published : DBNull.Value;
+                mTags.Value = (object?)metadata?.Tags ?? DBNull.Value;
+                mConfidence.Value = metadata is null ? DBNull.Value : metadata.Confidence;
                 htmlFiles.SaveAsync(page.Capture, page.HtmlGz, ct).GetAwaiter().GetResult();
                 hH.Value = Array.Empty<byte>();
                 insertPage.ExecuteNonQuery();
                 insertText.ExecuteNonQuery();
+                if (metadata is not null) upsertMetadata.ExecuteNonQuery();
+                else
+                {
+                    using var deleteMetadata = Cmd(conn, tx, "DELETE FROM PageMetadata WHERE CaptureId = $id");
+                    deleteMetadata.Parameters.AddWithValue("$id", id);
+                    deleteMetadata.ExecuteNonQuery();
+                }
+                upsertIndex.ExecuteNonQuery();
                 insertHtml.ExecuteNonQuery();
             }
 
@@ -524,6 +641,8 @@ public sealed class SqliteArchiveStore : IArchiveStore
         cmd.CommandText = sql;
         return cmd;
     }
+
+    private static object DbValue(long? value) => value.HasValue ? value.Value : DBNull.Value;
 
     private static CachedSearch LoadCachedSearch(SqliteConnection conn, long searchId, DateTimeOffset cachedAt)
     {

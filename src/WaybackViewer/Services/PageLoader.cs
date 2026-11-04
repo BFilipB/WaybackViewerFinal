@@ -24,6 +24,7 @@ public sealed class PageLoader(IArchiveClient archive, IOptions<PreloadOptions> 
         if (html.Length > max) html = html[..max];
 
         var parsed = PageParser.Parse(html);
+        parsed = parsed with { Metadata = PopularityEstimator.Enrich(parsed.Metadata, html, parsed.Text) };
         return new NewPage(capture, HtmlCodec.Compress(html), parsed, DateTimeOffset.UtcNow);
     }
 }

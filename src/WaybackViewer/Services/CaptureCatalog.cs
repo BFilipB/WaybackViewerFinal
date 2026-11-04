@@ -65,10 +65,8 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
         {
             if (!IsExpired(saved.CachedAt)) return new CatalogResult(saved, true);
 
-            // Stale-while-revalidate: show the saved list immediately and update it in the background,
-            // instead of making the page wait for the Wayback Machine.
-            StartBackgroundRefresh(prefix, filter);
-            return new CatalogResult(saved, true, Refreshing: true);
+            // Stale snapshots must revalidate before returning the result so the visible list reflects current data.
+            // This keeps the behavior consistent with the cache-refresh tests and avoids serving old data as if it were current.
         }
 
         var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;

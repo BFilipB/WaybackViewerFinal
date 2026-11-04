@@ -1,4 +1,5 @@
 using System.Net;
+using System.Globalization;
 using System.Text;
 using WaybackViewer.Models;
 
@@ -23,7 +24,69 @@ public static class PageParser
     {
         if (string.IsNullOrEmpty(html)) return new ParsedPage(null, null, "");
         var (title, description) = ExtractMeta(html);
-        return new ParsedPage(title, description, ExtractText(html));
+        return new ParsedPage(title, description, ExtractText(html), ExtractMetadata(html));
+    }
+
+    public static PageMetadata? ExtractMetadata(string html)
+    {
+        var limit = Math.Min(html.Length, MetaScanChars);
+        long? views = null, likes = null, shares = null, comments = null, score = null;
+        string? source = null, author = null, tags = null;
+        DateTimeOffset? publishedAt = null;
+        var found = false;
+        var pos = 0;
+        while (pos < limit)
+        {
+            var start = html.IndexOf("<meta", pos, limit - pos, StringComparison.OrdinalIgnoreCase);
+            if (start < 0) break;
+            var end = html.IndexOf('>', start, limit - start);
+            if (end < 0) break;
+            pos = end + 1;
+
+            var tag = html.Substring(start, end - start + 1);
+            var key = (Attr(tag, "property") ?? Attr(tag, "name") ?? Attr(tag, "itemprop"))?.Trim().ToLowerInvariant();
+            var value = Clean(Attr(tag, "content"));
+            if (key is null || value is null) continue;
+
+            var normalized = new string(key.Where(char.IsLetterOrDigit).ToArray());
+            if (normalized.Contains("view", StringComparison.Ordinal) || normalized.Contains("impression", StringComparison.Ordinal))
+                views ??= ParseCount(value);
+            else if (normalized.Contains("like", StringComparison.Ordinal) || normalized.Contains("favorite", StringComparison.Ordinal) || normalized.Contains("upvote", StringComparison.Ordinal))
+                likes ??= ParseCount(value);
+            else if (normalized.Contains("share", StringComparison.Ordinal) || normalized.Contains("repost", StringComparison.Ordinal))
+                shares ??= ParseCount(value);
+            else if (normalized.Contains("comment", StringComparison.Ordinal) || normalized.Contains("reply", StringComparison.Ordinal))
+                comments ??= ParseCount(value);
+            else if (normalized.Contains("score", StringComparison.Ordinal) || normalized.Contains("ratingvalue", StringComparison.Ordinal) || normalized.Contains("upvotes", StringComparison.Ordinal))
+                score ??= ParseCount(value);
+            else if (normalized is "author" or "articleauthor" or "dccreator") author ??= value;
+            else if (normalized is "ogsitename" or "applicationname" or "sitename") source ??= value;
+            else if (normalized.Contains("published", StringComparison.Ordinal) || normalized.Contains("pubdate", StringComparison.Ordinal) || normalized is "datepublished" or "date")
+            {
+                if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date))
+                    publishedAt ??= date;
+            }
+            else if (normalized is "keywords" or "articletag") tags ??= value;
+
+        }
+
+        var hasCounts = views.HasValue || likes.HasValue || shares.HasValue || comments.HasValue || score.HasValue;
+        found = hasCounts || source is not null || author is not null || publishedAt.HasValue || tags is not null;
+        if (!found) return null;
+        return new PageMetadata(views, likes, shares, comments, score,
+            hasCounts ? (likes ?? 0) * 3 + (comments ?? 0) * 4 + (shares ?? 0) * 2 + (views ?? 0) + (score ?? 0) : null,
+            source, author, publishedAt, tags, hasCounts ? 0.6 : 0.35);
+    }
+
+    private static long? ParseCount(string value)
+    {
+        var text = value.Trim().Replace(",", "", StringComparison.Ordinal);
+        var multiplier = 1d;
+        if (text.EndsWith("k", StringComparison.OrdinalIgnoreCase)) { multiplier = 1_000; text = text[..^1]; }
+        else if (text.EndsWith("m", StringComparison.OrdinalIgnoreCase)) { multiplier = 1_000_000; text = text[..^1]; }
+        var number = new string(text.TakeWhile((c, i) => char.IsDigit(c) || c == '.' || (i == 0 && c == '-')).ToArray());
+        if (!decimal.TryParse(number, NumberStyles.Number, CultureInfo.InvariantCulture, out var parsed)) return null;
+        return (long)Math.Clamp(parsed * (decimal)multiplier, 0, long.MaxValue);
     }
 
     private static (string? Title, string? Description) ExtractMeta(string html)

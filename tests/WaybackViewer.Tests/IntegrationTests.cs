@@ -166,7 +166,347 @@ public class HomePageTests
     }
 
     [Fact]
-    public async Task Unusable_input_shows_a_message_without_calling_the_archive()
+    public async Task Popularity_sort_and_filter_values_are_applied_and_preserved_in_the_form()
+    {
+        await using var host = await AppHost.StartAsync();
+        var captures = new[]
+        {
+            new Capture("20200101010101", "https://example.com/first", "text/html", "200"),
+            new Capture("20200101020202", "https://example.com/second", "text/html", "200")
+        };
+        host.RouteSite("example.com/", captures);
+        await host.Store!.SaveSearchAsync("example.com/", "html200", captures, DateTimeOffset.UtcNow);
+        await host.Store.SavePagesAsync([
+            new NewPage(captures[0], HtmlCodec.Compress("<html><head><meta property=\"og:likes\" content=\"10\"></head><body>first</body></html>"),
+                new ParsedPage("first", null, "first", new PageMetadata(Likes: 10)), DateTimeOffset.UtcNow),
+            new NewPage(captures[1], HtmlCodec.Compress("<html><head><meta property=\"og:likes\" content=\"20\"></head><body>second</body></html>"),
+                new ParsedPage("second", null, "second", new PageMetadata(Likes: 20)), DateTimeOffset.UtcNow)
+        ]);
+
+        var html = await host.GetAsync("/?url=example.com/&sort=liked&popularityMetric=likes&minPopularity=15");
+
+        Assert.Contains("value=\"liked\" selected=\"selected\"", html);
+        Assert.Contains("value=\"likes\" selected=\"selected\"", html);
+        Assert.Contains("name=\"minPopularity\"", html);
+        Assert.Contains("value=\"15\"", html);
+        Assert.Contains("data-ts=\"20200101020202\"", html);
+        Assert.DoesNotContain("data-ts=\"20200101010101\"", html);
+    }
+
+    private static async Task<(AppHost host, Capture[] caps)> PopularityHostAsync()
+    {
+        var host = await AppHost.StartAsync();
+        var caps = new[]
+        {
+            new Capture("20200101010101", "https://example.com/a", "text/html", "200"),
+            new Capture("20200102010101", "https://example.com/b", "text/html", "200"),
+            new Capture("20200103010101", "https://example.com/c", "text/html", "200"),
+            new Capture("20200104010101", "https://example.com/d", "text/html", "200")
+        };
+        host.RouteSite("example.com/", caps);
+        await host.Store!.SaveSearchAsync("example.com/", "html200", caps, DateTimeOffset.UtcNow);
+        long[] likes = [30, 10, 20];
+        var pages = new List<NewPage>();
+        for (var i = 0; i < 3; i++)
+            pages.Add(new NewPage(caps[i], HtmlCodec.Compress("<html><body>p" + i + "</body></html>"),
+                new ParsedPage("p" + i, null, "p" + i, new PageMetadata(Likes: likes[i])), DateTimeOffset.UtcNow));
+        await host.Store.SavePagesAsync(pages);
+        return (host, caps);
+    }
+
+    [Fact]
+    public async Task Layout_and_theme_switches_are_rendered()
+    {
+        await using var host = await AppHost.StartAsync();
+        var html = await host.GetAsync("/");
+        Assert.Contains("id=\"layoutSelect\"", html);
+        Assert.Contains("value=\"focus\"", html);
+        Assert.Contains("id=\"themeSelect\"", html);
+        Assert.Contains("wb-layout", html);
+    }
+
+    [Fact]
+    public async Task Popularity_presets_are_offered_and_filter_when_followed()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&popularityMetric=likes");
+        Assert.Contains("popularity-presets", html);
+        Assert.Contains("Top 10%", html);
+        Assert.Contains("minPopularity=30", html);
+        var filtered = await host.GetAsync("/?url=example.com/&popularityMetric=likes&minPopularity=20");
+        Assert.Contains("data-ts=\"20200101010101\"", filtered);
+        Assert.Contains("data-ts=\"20200103010101\"", filtered);
+        Assert.DoesNotContain("data-ts=\"20200102010101\"", filtered);
+    }
+
+    [Fact]
+    public async Task Pending_popularity_data_is_reported_to_the_user()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&sort=liked");
+        Assert.Contains("popularity-pending", html);
+        Assert.Contains("have no popularity data yet", html);
+        var plain = await host.GetAsync("/?url=example.com/");
+        Assert.DoesNotContain("popularity-pending", plain);
+    }
+
+    [Fact]
+    public async Task Sort_and_filter_memory_script_is_present()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/");
+        Assert.Contains("wb-sort-filter", html);
+    }
+
+    [Fact]
+    public async Task CaptureSet_export_honors_popularity_sort_and_filter()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var json = await host.GetAsync("/Home/CaptureSet?url=example.com/&sort=liked");
+        var order = new[] { "20200101010101", "20200103010101", "20200102010101", "20200104010101" }
+            .Select(ts => json.IndexOf(ts, StringComparison.Ordinal)).ToArray();
+        Assert.All(order, i => Assert.True(i >= 0));
+        Assert.True(order[0] < order[1] && order[1] < order[2] && order[2] < order[3]);
+
+        var filtered = await host.GetAsync("/Home/CaptureSet?url=example.com/&popularityMetric=likes&minPopularity=20");
+        Assert.Contains("20200101010101", filtered);
+        Assert.Contains("20200103010101", filtered);
+        Assert.DoesNotContain("20200102010101", filtered);
+        Assert.DoesNotContain("20200104010101", filtered);
+    }
+
+    [Theory]
+    [InlineData("popular")]
+    [InlineData("engaged")]
+    [InlineData("commented")]
+    [InlineData("liked")]
+    [InlineData("viewed")]
+    [InlineData("score")]
+    [InlineData("newest")]
+    [InlineData("bogus")]
+    public async Task Every_sort_mode_renders_all_captures(string sort)
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&sort=" + sort);
+        foreach (var ts in new[] { "20200101010101", "20200102010101", "20200103010101", "20200104010101" })
+            Assert.Contains("data-ts=\"" + ts + "\"", html);
+    }
+
+    [Theory]
+    [InlineData("views")]
+    [InlineData("likes")]
+    [InlineData("comments")]
+    [InlineData("engaged")]
+    [InlineData("score")]
+    [InlineData("nope")]
+    public async Task Every_popularity_metric_is_accepted_without_errors(string metric)
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&popularityMetric=" + metric + "&minPopularity=1");
+        Assert.DoesNotContain("Exception", html);
+        Assert.Contains("id=\"searchBar\"", html);
+    }
+
+    [Fact]
+    public async Task Popularity_filter_never_downloads_pages_from_the_archive()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        await host.GetAsync("/?url=example.com/&sort=liked&popularityMetric=likes&minPopularity=10");
+        await host.GetAsync("/?url=example.com/&sort=viewed&popularityMetric=views&minPopularity=1");
+        Assert.True(host.Archive.Calls(ArchiveUrls.Cdx("example.com/", "html200")) <= 1);
+    }
+
+    [Fact]
+    public async Task Server_pagination_with_popularity_sort_keeps_order_across_pages()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var p1 = await host.GetAsync("/?url=example.com/&sort=liked&pageSize=25");
+        Assert.Contains("data-ts=\"20200101010101\"", p1);
+        var big = await host.GetAsync("/?url=example.com/&sort=liked&page=99");
+        Assert.Contains("data-ts=", big);
+    }
+
+    [Fact]
+    public async Task Content_search_combines_with_popularity_filter()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&searchMode=content&q=p0&popularityMetric=likes&minPopularity=20");
+        Assert.Contains("data-ts=\"20200101010101\"", html);
+        Assert.DoesNotContain("data-ts=\"20200103010101\"", html);
+    }
+
+    [Fact]
+    public async Task Layout_has_all_modes_and_all_themes()
+    {
+        await using var host = await AppHost.StartAsync();
+        var html = await host.GetAsync("/");
+        foreach (var l in new[] { "classic", "focus", "wide", "compact" })
+            Assert.Contains("value=\"" + l + "\"", html);
+        foreach (var t in new[] { "midnight-command", "obsidian-blue", "graphite-amber", "aurora-steel", "night-ops-green",
+                     "deep-violet", "slate-cyan", "iron-redline", "carbon-gold", "arctic-shadow" })
+            Assert.Contains(t, html);
+    }
+
+    [Fact]
+    public async Task Every_theme_has_readable_text_and_accent_contrast()
+    {
+        await using var host = await AppHost.StartAsync();
+        var html = await host.GetAsync("/");
+        var themes = System.Text.RegularExpressions.Regex.Matches(html,
+            @"data-theme='([a-z\-]+)'\]\s*\{([^}]*)\}");
+        Assert.True(themes.Count >= 10);
+        static double Lum(string hex)
+        {
+            double Ch(int i)
+            {
+                var v = Convert.ToInt32(hex.Substring(1 + i * 2, 2), 16) / 255.0;
+                return v <= 0.03928 ? v / 12.92 : Math.Pow((v + 0.055) / 1.055, 2.4);
+            }
+            return 0.2126 * Ch(0) + 0.7152 * Ch(1) + 0.0722 * Ch(2);
+        }
+        static double Ratio(string a, string b)
+        {
+            var (x, y) = (Lum(a), Lum(b));
+            return (Math.Max(x, y) + 0.05) / (Math.Min(x, y) + 0.05);
+        }
+        foreach (System.Text.RegularExpressions.Match m in themes)
+        {
+            string Get(string name) => System.Text.RegularExpressions.Regex.Match(m.Groups[2].Value, "--" + name + @":\s*(#[0-9a-fA-F]{6})").Groups[1].Value;
+            var (bg, panel, text, muted, accent) = (Get("bg"), Get("panel"), Get("text"), Get("muted"), Get("accent"));
+            Assert.True(Ratio(text, bg) >= 7, m.Groups[1].Value + " text on bg");
+            Assert.True(Ratio(text, panel) >= 7, m.Groups[1].Value + " text on panel");
+            Assert.True(Ratio(muted, panel) >= 4.5, m.Groups[1].Value + " muted on panel");
+            Assert.True(Ratio(accent, panel) >= 3, m.Groups[1].Value + " accent on panel");
+        }
+    }
+
+    [Fact]
+    public async Task Layout_script_is_complete_and_has_keyboard_shortcuts()
+    {
+        await using var host = await AppHost.StartAsync();
+        var html = await host.GetAsync("/");
+        Assert.Contains("toLocaleTimeString", html);
+        Assert.Contains("e.altKey", html);
+        Assert.Contains("@media (max-width: 760px)", html);
+    }
+
+    [Fact]
+    public async Task Histogram_view_tools_and_live_pending_notice_are_rendered()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&popularityMetric=likes");
+        Assert.Contains("class=\"popularity-histogram\"", html);
+        Assert.Contains("copyViewLink", html);
+        Assert.Contains("saveView", html);
+        Assert.Contains("wb-saved-views", html);
+        var (host2, _) = await PopularityHostAsync();
+        await using var _h2 = host2;
+        var pending = await host2.GetAsync("/?url=example.com/&sort=liked");
+        Assert.Contains("id=\"popularityPending\"", pending);
+        var plain = await host.GetAsync("/");
+        Assert.DoesNotContain("class=\"popularity-histogram\"", plain);
+    }
+
+    [Fact]
+    public async Task Sort_by_likes_orders_captures_descending_and_unknown_last()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&sort=liked");
+        var order = new[] { "20200101010101", "20200103010101", "20200102010101", "20200104010101" }
+            .Select(ts => html.IndexOf("data-ts=\"" + ts + "\"", StringComparison.Ordinal)).ToArray();
+        Assert.All(order, i => Assert.True(i >= 0));
+        Assert.True(order[0] < order[1] && order[1] < order[2] && order[2] < order[3]);
+    }
+
+    [Fact]
+    public async Task Filter_excludes_unknown_and_low_and_does_not_hit_archive_for_pages()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var before = host.Archive.TotalCalls;
+        var html = await host.GetAsync("/?url=example.com/&popularityMetric=likes&minPopularity=20");
+        Assert.Contains("data-ts=\"20200101010101\"", html);
+        Assert.Contains("data-ts=\"20200103010101\"", html);
+        Assert.DoesNotContain("data-ts=\"20200102010101\"", html);
+        Assert.DoesNotContain("data-ts=\"20200104010101\"", html);
+        Assert.True(host.Archive.TotalCalls - before <= 1);
+    }
+
+    [Fact]
+    public async Task Invalid_sort_and_negative_threshold_fall_back_to_defaults()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&sort=bogus&popularityMetric=nope&minPopularity=-5");
+        foreach (var ts in new[] { "20200101010101", "20200102010101", "20200103010101", "20200104010101" })
+            Assert.Contains("data-ts=\"" + ts + "\"", html);
+    }
+
+    [Fact]
+    public async Task Default_request_without_popularity_params_is_unchanged()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/");
+        Assert.True(html.IndexOf("data-ts=\"20200104010101\"", StringComparison.Ordinal)
+                    < html.IndexOf("data-ts=\"20200101010101\"", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Popularity_summary_badges_and_reset_link_are_shown()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&sort=liked&popularityMetric=likes&minPopularity=20");
+        Assert.Contains("popularity-summary", html);
+        Assert.Contains("popularity-badges", html);
+        Assert.Contains("(2 hidden)", html);
+        Assert.Contains("Reset sort and popularity filter", html);
+        Assert.Contains("sort=newest", html);
+    }
+
+    [Fact]
+    public async Task Popularity_filter_with_no_matches_explains_itself()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&popularityMetric=likes&minPopularity=999");
+        Assert.Contains("No captures reach 999 likes", html);
+        Assert.DoesNotContain("data-ts=", html);
+    }
+
+    [Fact]
+    public async Task Default_view_has_no_popularity_summary()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/");
+        Assert.DoesNotContain("popularity-summary", html);
+    }
+
+    [Fact]
+    public async Task Popularity_filter_combines_with_year_filter_and_paging()
+    {
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var html = await host.GetAsync("/?url=example.com/&year=2020&popularityMetric=likes&minPopularity=10&pageSize=25&page=9");
+        Assert.Contains("data-ts=\"20200101010101\"", html);
+        Assert.DoesNotContain("data-ts=\"20200104010101\"", html);
+    }
+
+    [Fact]
+    public async Task Unusable_in_valid_url_rejected()
     {
         await using var host = await AppHost.StartAsync();
         var html = await host.GetAsync("/?url=" + Uri.EscapeDataString("not a url"));

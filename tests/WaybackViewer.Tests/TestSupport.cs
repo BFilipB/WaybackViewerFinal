@@ -43,6 +43,8 @@ public sealed class SlowOperationStore : IArchiveStore
     public Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit, CancellationToken ct = default) => inner.GetSearchPageAsync(prefix, filter, offset, limit, ct);
     public Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> captures, DateTimeOffset cachedAt, CancellationToken ct = default) => inner.SaveSearchAsync(prefix, filter, captures, cachedAt, ct);
     public Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default) => inner.GetPageAsync(timestamp, original, includeHtml, ct);
+    public Task<IReadOnlyList<long>> MatchCaptureIdsAsync(string query, CancellationToken ct = default) => inner.MatchCaptureIdsAsync(query, ct);
+    public Task<IReadOnlyDictionary<string, PageMetadata>> GetPopularityMetadataAsync(string prefix, string filter, CancellationToken ct = default) => inner.GetPopularityMetadataAsync(prefix, filter, ct);
     public Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default) => inner.SavePagesAsync(pages, ct);
     public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind, CancellationToken ct = default)
     {
@@ -117,6 +119,8 @@ public sealed class DelayedSaveStore : IArchiveStore
     public Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit, CancellationToken ct = default) => inner.GetSearchPageAsync(prefix, filter, offset, limit, ct);
     public Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> captures, DateTimeOffset cachedAt, CancellationToken ct = default) => inner.SaveSearchAsync(prefix, filter, captures, cachedAt, ct);
     public Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default) => inner.GetPageAsync(timestamp, original, includeHtml, ct);
+    public Task<IReadOnlyList<long>> MatchCaptureIdsAsync(string query, CancellationToken ct = default) => inner.MatchCaptureIdsAsync(query, ct);
+    public Task<IReadOnlyDictionary<string, PageMetadata>> GetPopularityMetadataAsync(string prefix, string filter, CancellationToken ct = default) => inner.GetPopularityMetadataAsync(prefix, filter, ct);
 
     public async Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default)
     {
@@ -213,6 +217,8 @@ public sealed class ThrowingSaveStore : IArchiveStore
     public Task<BackgroundOperation?> GetOperationAsync(long id, CancellationToken ct = default) => Task.FromResult<BackgroundOperation?>(null);
     public Task<IReadOnlyList<BackgroundOperation>> GetOperationsAsync(bool activeOnly = false, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<BackgroundOperation>>([]);
     public Task UpdateOperationAsync(BackgroundOperation operation, CancellationToken ct = default) => Task.CompletedTask;
+    public Task<IReadOnlyList<long>> MatchCaptureIdsAsync(string query, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<long>>(Array.Empty<long>());
+    public Task<IReadOnlyDictionary<string, PageMetadata>> GetPopularityMetadataAsync(string prefix, string filter, CancellationToken ct = default) => Task.FromResult<IReadOnlyDictionary<string, PageMetadata>>(new Dictionary<string, PageMetadata>());
 }
 
 public static class SampleData

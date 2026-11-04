@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.Json.Serialization;
 
 namespace WaybackViewer.Models;
@@ -27,7 +27,24 @@ public sealed record PagedSearchResult(
     IReadOnlyList<StoredCapture> Captures,
     int TotalCount);
 
-public sealed record ParsedPage(string? Title, string? Description, string Text);
+public sealed record PageMetadata(
+    long? Views = null,
+    long? Likes = null,
+    long? Shares = null,
+    long? Comments = null,
+    long? Score = null,
+    long? EngagementScore = null,
+    string? Source = null,
+    string? Author = null,
+    DateTimeOffset? PublishedAt = null,
+    string? Tags = null,
+    double Confidence = 0)
+{
+    public long EffectiveEngagementScore =>
+        EngagementScore ?? (Score ?? 0) + (Views ?? 0) + (Likes ?? 0) * 3 + (Comments ?? 0) * 4 + (Shares ?? 0) * 2;
+}
+
+public sealed record ParsedPage(string? Title, string? Description, string Text, PageMetadata? Metadata = null);
 
 /// A freshly downloaded page, ready to be saved (HTML already gzip-compressed).
 public sealed record NewPage(Capture Capture, byte[] HtmlGz, ParsedPage Parsed, DateTimeOffset FetchedAt);
@@ -105,6 +122,8 @@ public sealed record WorkflowStatusView(
     WorkflowBar Preload,
     IReadOnlyList<WorkflowEvent> Timeline);
 
+public sealed record PopularityPreset(int Percent, int Value);
+
 public sealed record CatalogResult(SearchSnapshot Snapshot, bool FromDatabase, bool Refreshing = false);
 
 public sealed record CaptureListViewModel(
@@ -123,7 +142,17 @@ public sealed record CaptureListViewModel(
     string SearchMode = "url",
     IReadOnlyDictionary<string, int>? GroupSizes = null,
     int HiddenNotSaved = 0,
-    bool Refreshing = false)
+    bool Refreshing = false,
+    string SortMode = "newest",
+    string PopularityMetric = "none",
+    int? MinPopularity = null,
+    IReadOnlyDictionary<string, PageMetadata>? Popularity = null,
+    int PopularityExcluded = 0,
+    int PopularityPending = 0,
+    IReadOnlyList<PopularityPreset>? Presets = null,
+    IReadOnlyList<int>? Histogram = null,
+    bool DownloadAll = false)
 {
     public int TotalPages => Math.Max(1, (int)Math.Ceiling(TotalCaptures / (double)PageSize));
+    public bool HasPopularityFilter => !string.Equals(PopularityMetric, "none", StringComparison.OrdinalIgnoreCase) && (MinPopularity ?? 0) > 0;
 }

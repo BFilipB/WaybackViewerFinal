@@ -94,7 +94,7 @@ public static class UrlClassifier
         if (IsHost(host, "reddit.com")) return Reddit(segments);
         if (host == "redd.it") return segments.Length >= 1 && IsId(segments[0])
             ? new UrlInfo(Thread, "reddit:t:" + segments[0]) : Generic(host, uri);
-        if (host is "twitter.com" or "x.com" or "mobile.twitter.com" or "mobile.x.com") return Twitter(host, uri, segments);
+        if (LooksLikeMicroblogHost(host)) return SocialHost(host, uri, segments);
         if (host == "news.ycombinator.com") return HackerNews(host, uri, segments);
         if (IsHost(host, "youtube.com") || host == "youtu.be") return YouTube(host, uri, segments);
 
@@ -134,7 +134,10 @@ public static class UrlClassifier
         { "i", "home", "search", "explore", "hashtag", "intent", "share", "login", "signup", "messages", "settings",
           "notifications", "compose", "tos", "privacy", "about" };
 
-    private static UrlInfo Twitter(string host, Uri uri, string[] seg)
+    private static bool LooksLikeMicroblogHost(string host) =>
+        host == "x.com" || host == "mobile.x.com" || host.EndsWith(".x.com", StringComparison.Ordinal);
+
+    private static UrlInfo SocialHost(string host, Uri uri, string[] seg)
     {
         for (var i = 0; i + 1 < seg.Length; i++)
             if ((seg[i] is "status" or "statuses") && seg[i + 1].Length > 5 && seg[i + 1].All(char.IsAsciiDigit))

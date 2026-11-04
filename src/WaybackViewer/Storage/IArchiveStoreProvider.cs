@@ -31,6 +31,22 @@ public sealed class InMemoryArchiveStoreProvider : IArchiveStoreProvider
     }
 }
 
+public sealed class PostgresArchiveStoreProvider : IArchiveStoreProvider
+{
+    public string Name => "Postgres";
+
+    public IArchiveStore Create(IConfiguration configuration)
+    {
+        var options = configuration.GetSection("Storage").Get<StorageOptions>() ?? new StorageOptions();
+        var connectionString = configuration.GetConnectionString("WaybackDb");
+        if (string.IsNullOrWhiteSpace(connectionString) || !connectionString.Contains('='))
+            throw new InvalidOperationException(
+                "Storage:Provider=Postgres needs ConnectionStrings:WaybackDb, e.g. Host=db;Database=wayback;Username=wayback;Password=...");
+        var root = AppBuilder.ResolveDatabasePath(string.IsNullOrWhiteSpace(options.HtmlRoot) ? "html-payloads" : options.HtmlRoot);
+        return new Sql.SqlArchiveStore(new Sql.PostgresDialect(), connectionString, new HtmlFileStore(root));
+    }
+}
+
 public sealed class SqliteArchiveStoreProvider : IArchiveStoreProvider
 {
     public string Name => "Sqlite";

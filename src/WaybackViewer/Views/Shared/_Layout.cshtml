@@ -7,6 +7,7 @@
 			{"prefetch":[{"where":{"and":[{"href_matches":"/?*"},{"not":{"href_matches":"/*?*refresh=*"}},{"not":{"href_matches":"/*?*downloadAll=*"}}]},"eagerness":"moderate"}]}
 		</script>
 		<meta charset="utf-8" />
+		<script>try { var d = document.documentElement; d.setAttribute('data-theme', localStorage.getItem('wb-theme') || 'midnight-command'); d.setAttribute('data-layout', localStorage.getItem('wb-layout') || 'classic'); } catch (e) { }</script>
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>@ViewData["Title"]</title>
 		<style>
@@ -121,6 +122,28 @@
 			.theme-switch { margin-left: 6px; display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
 			.theme-switch label { letter-spacing: .08em; text-transform: uppercase; }
 			.theme-switch select { height: 24px; padding: 2px 6px; min-width: 170px; font-size: 11px; }
+			.theme-switch select#layoutSelect { min-width: 110px; }
+			:root[data-layout='focus'] .workspace { grid-template-columns: minmax(0, 1fr); max-width: 1100px; }
+			:root[data-layout='focus'] .facets, :root[data-layout='focus'] .inspector { display: none; }
+			:root[data-layout='wide'] .workspace { grid-template-columns: 240px minmax(0, 1fr) 300px; max-width: none; }
+			:root[data-layout='wide'] .capture-list, :root[data-layout='wide'] .spy-header, :root[data-layout='wide'] .activity, :root[data-layout='wide'] .timeline { max-width: none; }
+			:root[data-layout='compact'] .capture-list { gap: 0; }
+			:root[data-layout='compact'] .card { border-radius: 0; border-top-width: 0; }
+			:root[data-layout='compact'] .meta { padding: 3px 10px; }
+			.popularity-histogram { display: flex; align-items: flex-end; gap: 3px; height: 44px; margin: 4px 0 8px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 3px; background: var(--panel); max-width: 320px; }
+			.popularity-histogram .hbar { flex: 1; background: var(--accent); opacity: .8; border-radius: 1px; min-width: 4px; }
+			.view-tools { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+			#savedViews { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+			@@media (max-width: 760px) {
+			.theme-switch { flex-wrap: wrap; margin-left: 0; }
+			.theme-switch select, .theme-switch select#layoutSelect { min-width: 0; }
+			.workspace { grid-template-columns: minmax(0, 1fr) !important; }
+			.facets, .inspector { display: none; }
+			}
+			:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+			:root[data-layout='compact'] .activity, :root[data-layout='compact'] .timeline { display: none; }
+			.popularity-presets .btn.on { background: var(--accent-d); border-color: var(--accent); color: #fff; }
+			.popularity-presets .btn { margin-left: 4px; }
 			input, select { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 2px; font-family: inherit; }
 			input:focus, select:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px rgba(76,144,240,.3); }
 			button, .btn { background: var(--panel2); color: var(--text); border: 1px solid var(--line); border-radius: 2px; font-family: inherit; font-size: 12px; }
@@ -213,6 +236,13 @@
 					<option value="carbon-gold">Carbon Gold</option>
 					<option value="arctic-shadow">Arctic Shadow</option>
 				</select>
+				<label for="layoutSelect">Layout</label>
+				<select id="layoutSelect" aria-label="Page layout">
+					<option value="classic">Classic</option>
+					<option value="focus">Focus (list only)</option>
+					<option value="wide">Wide</option>
+					<option value="compact">Compact</option>
+				</select>
 			</span>
 			<span class="stamp" aria-hidden="true">Archive Ops</span>
 		</header>
@@ -229,6 +259,19 @@
 
 			var saved = localStorage.getItem(storageKey) || defaultTheme;
 			applyTheme(saved);
+			var layoutSelect = document.getElementById('layoutSelect');
+			var layoutKey = 'wb-layout';
+			var savedLayout = localStorage.getItem(layoutKey) || 'classic';
+			function applyLayout(layout) { document.documentElement.setAttribute('data-layout', layout || 'classic'); }
+			applyLayout(savedLayout);
+			if (layoutSelect) {
+			layoutSelect.value = savedLayout;
+			layoutSelect.addEventListener('change', function () {
+			var chosen = layoutSelect.value || 'classic';
+			applyLayout(chosen);
+			localStorage.setItem(layoutKey, chosen);
+			});
+			}
 			if (themeSelect) {
 			themeSelect.value = saved;
 			themeSelect.addEventListener('change', function () {
@@ -238,8 +281,21 @@
 			});
 			}
 
-			function t() { c.textContent = new Date().toISOString().replace('T', ' ').slice(0, 19) + 'Z'; }
+			function t() { if (c) c.textContent = new Date().toLocaleTimeString(); }
 			t(); setInterval(t, 1000);
+
+			function cycle(select, step) {
+			if (!select || !select.options.length) return;
+			select.selectedIndex = (select.selectedIndex + step + select.options.length) % select.options.length;
+			select.dispatchEvent(new Event('change'));
+			}
+			document.addEventListener('keydown', function (e) {
+			if (!e.altKey || e.ctrlKey || e.metaKey) return;
+			var tag = (e.target && e.target.tagName) || '';
+			if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+			if (e.key === 't' || e.key === 'T') { cycle(themeSelect, e.shiftKey ? -1 : 1); e.preventDefault(); }
+			else if (e.key === 'l' || e.key === 'L') { cycle(layoutSelect, e.shiftKey ? -1 : 1); e.preventDefault(); }
+			});
 			})();
 		</script>
 		@RenderBody()

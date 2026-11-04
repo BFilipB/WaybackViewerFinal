@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Build, unit/integration, browser and PostgreSQL tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: wayback
+          POSTGRES_PASSWORD: wayback
+          POSTGRES_DB: wayback_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U wayback"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      WAYBACK_TEST_POSTGRES: Host=localhost;Port=5432;Database=wayback_test;Username=wayback;Password=wayback;Maximum Pool Size=30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: dotnet build --nologo -c Release
+      - name: Install Chromium for browser tests
+        run: pwsh tests/WaybackViewer.Tests/bin/Release/net8.0/playwright.ps1 install --with-deps chromium
+      - name: Run all tests (browser tests run for real here)
+        run: dotnet test --no-build -c Release --nologo --logger "trx" --results-directory TestResults
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: TestResults
+
+  docker:
+    name: Docker image builds and answers /healthz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up --build -d
+      - name: Wait for health
+        run: |
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8080/healthz && exit 0
+            sleep 2
+          done
+          docker compose logs
+          exit 1
+      - name: Home page renders
+        run: curl -fsS http://localhost:8080/ | grep -q 'name="sort"'
+      - if: always()
+        run: docker compose down -v
+
+  docker-postgres:
+    name: Docker compose with PostgreSQL answers /healthz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f docker-compose.yml -f docker/compose.postgres.yml up --build -d
+      - name: Wait for health (the app creates its schema in PostgreSQL)
+        run: |
+          for i in $(seq 1 40); do
+            curl -fsS http://localhost:8080/healthz && exit 0
+            sleep 2
+          done
+          docker compose -f docker-compose.yml -f docker/compose.postgres.yml logs
+          exit 1
+      - run: curl -fsS http://localhost:8080/ | grep -q 'name="sort"'
+      - if: always()
+        run: docker compose -f docker-compose.yml -f docker/compose.postgres.yml down -v
+
+  load:
+    name: Smoke and load script
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - run: powershell -NoProfile -File scripts/Test-LoadAndSmoke.ps1

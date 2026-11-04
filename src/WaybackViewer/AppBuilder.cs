@@ -36,6 +36,7 @@ public static class AppBuilder
         services.AddSingleton<ITimeSource, SystemTimeSource>();
         services.AddSingleton<IArchiveStoreProvider, SqliteArchiveStoreProvider>();
         services.AddSingleton<IArchiveStoreProvider, InMemoryArchiveStoreProvider>();
+        services.AddSingleton<IArchiveStoreProvider, PostgresArchiveStoreProvider>();
         services.AddSingleton<IArchiveStore>(sp => CreateStore(sp, builder.Configuration));
         services.AddSingleton<IArchiveClient>(sp =>
         {
@@ -84,14 +85,22 @@ public static class AppBuilder
         return app;
     }
 
+    private static readonly string[] KnownExternalProviders = ["SqlServer", "MySql", "MariaDb", "Oracle"];
+
     private static IArchiveStore CreateStore(IServiceProvider sp, IConfiguration configuration)
     {
         var provider = sp.GetRequiredService<IOptions<StorageOptions>>().Value.Provider;
         var providers = sp.GetServices<IArchiveStoreProvider>().ToList();
-        var match = providers.LastOrDefault(p => string.Equals(p.Name, provider, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidOperationException(
-                $"Unknown Storage:Provider '{provider}'. Available: {string.Join(", ", providers.Select(p => p.Name))}.");
-        return match.Create(configuration);
+        var match = providers.LastOrDefault(p => string.Equals(p.Name, provider, StringComparison.OrdinalIgnoreCase));
+        if (match is not null) return match.Create(configuration);
+
+        var available = string.Join(", ", providers.Select(p => p.Name));
+        if (KnownExternalProviders.Contains(provider, StringComparer.OrdinalIgnoreCase))
+            throw new NotSupportedException(
+                $"Storage:Provider '{provider}' is not bundled with this build (available: {available}). " +
+                "Implement IArchiveStoreProvider for it and register it with AddSingleton<IArchiveStoreProvider, ...>(); " +
+                "see docs/DATABASES.md.");
+        throw new InvalidOperationException($"Unknown Storage:Provider '{provider}'. Available: {available}.");
     }
 
     /// A relative path is placed in the user's local application-data folder, so the database is found again no
