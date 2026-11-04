@@ -2,16 +2,16 @@
 #   docker compose up --build        -> http://localhost:8080
 services:
   wayback:
-	build: .
-	ports:
-	  - "8080:8080"
-	environment:
-	  Storage__Provider: Sqlite
-	  ConnectionStrings__WaybackDb: Data Source=/data/wayback.db
-	  Storage__HtmlRoot: /data/html-payloads
-	volumes:
-	  - wayback-data:/data
-	restart: unless-stopped
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      Storage__Provider: Sqlite
+      ConnectionStrings__WaybackDb: Data Source=/data/wayback.db
+      Storage__HtmlRoot: /data/html-payloads
+    volumes:
+      - wayback-data:/data
+    restart: unless-stopped
 
 volumes:
   wayback-data:
