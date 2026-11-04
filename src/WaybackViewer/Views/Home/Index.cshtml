@@ -1273,9 +1273,11 @@ else if (Model.CachedAt is not null)
             if (saved) { fields[0].value = saved.sort || fields[0].value; fields[1].value = saved.popularityMetric || fields[1].value; fields[2].value = saved.minPopularity || fields[2].value; }
           } catch { }
         }
-        form.addEventListener('submit', () => {
+        const persist = () => {
           try { localStorage.setItem(key, JSON.stringify({ sort: fields[0].value, popularityMetric: fields[1].value, minPopularity: fields[2].value })); } catch { }
-        });
+        };
+        form.addEventListener('submit', persist);
+        fields.forEach(f => f.addEventListener('change', persist));
       })();
       // 4) Pending popularity data: follow the background downloads and offer a reload when they finish.
       (function livePending() {
