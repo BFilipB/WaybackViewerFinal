@@ -442,6 +442,20 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     public async Task<IActionResult> OperationStatus(CancellationToken ct = default) =>
         Json(await store.GetOperationsAsync(activeOnly: false, ct));
 
+    /// URLs that already have a capture list in the database (most recently used first), for the search box suggestions.
+    public async Task<IActionResult> KnownUrls(CancellationToken ct = default)
+    {
+        var operations = await store.GetOperationsAsync(activeOnly: false, ct);
+        var urls = operations
+            .Where(o => o.Kind == OperationKind.CaptureLoad && o.Completed > 0 && !string.IsNullOrWhiteSpace(o.Prefix))
+            .OrderByDescending(o => o.UpdatedAt)
+            .Select(o => o.Prefix)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(200)
+            .ToList();
+        return Json(urls);
+    }
+
     public async Task<IActionResult> WorkflowStatus(string url, string? filter, CancellationToken ct = default)
     {
         var prefix = UrlInput.NormalizePrefix(url ?? "");

@@ -51,7 +51,8 @@
 }
 
   <form id="searchBar" method="get" class="bar">
-  <input name="url" value="@Model.Url" size="45" placeholder="example.com/blog/  (or paste a web.archive.org link)" />
+  <input name="url" value="@Model.Url" size="45" list="knownUrls" autocomplete="off" placeholder="example.com/blog/  (or paste a web.archive.org link)" />
+  <datalist id="knownUrls"></datalist>
   <select name="filter">
     <option value="html200" selected="@(Model.Filter == "html200" ? "selected" : null)">HTML pages, status 200</option>
     <option value="html" selected="@(Model.Filter == "html" ? "selected" : null)">HTML pages, any status</option>
@@ -1299,6 +1300,15 @@ else if (Model.CachedAt is not null)
           if (ticks < 600) setTimeout(tick, 1500);
         }
         setTimeout(tick, 1500);
+      })();
+      // Suggest only URLs that already have captures in the database.
+      (function knownUrlSuggestions() {
+        const list = document.getElementById('knownUrls');
+        if (!list) return;
+        fetch('/Home/KnownUrls').then(r => r.ok ? r.json() : []).then(urls => {
+          list.textContent = '';
+          (urls || []).forEach(u => { const o = document.createElement('option'); o.value = u; list.appendChild(o); });
+        }).catch(() => { });
       })();
       // 5) Copy a link to this view; save and recall named views.
       (function viewTools() {
