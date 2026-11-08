@@ -135,6 +135,16 @@
 			.spy-header b { color: #fff; font-size: 12px; letter-spacing: .1em; }
 			.spy-header .stamp { margin-left: auto; color: var(--warn); border: 1px solid var(--warn); border-radius: 2px; padding: 1px 6px; font-size: 10px; }
 			.spy-header .clock { font-family: var(--font-mono); color: var(--text); }
+
+			/* readable links on every theme; the header wraps instead of overflowing onto the page */
+			a, a:visited { color: var(--accent); }
+			a:hover { color: var(--text); }
+			.spy-header { height: auto; min-height: 40px; flex-wrap: wrap; row-gap: 6px; padding: 8px 12px; box-sizing: border-box; position: relative; z-index: 5; }
+			.spy-header b { white-space: nowrap; }
+			.site-nav { display: flex; flex-wrap: wrap; gap: 4px; text-transform: none; letter-spacing: 0; font-size: 13px; }
+			.site-nav a, .site-nav a:visited { color: var(--text); text-decoration: none; padding: 5px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel2); }
+			.site-nav a:hover { border-color: var(--accent); color: var(--accent); }
+			.spy-header .theme-switch { margin-left: auto; display: flex; align-items: center; gap: 6px; }
 			.spy-header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
 			.theme-switch { margin-left: 6px; display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
 			.theme-switch label { letter-spacing: .08em; text-transform: uppercase; }
@@ -237,7 +247,7 @@
 		<header class="spy-header" role="banner">
 			<span class="dot" aria-hidden="true"></span>
 			<b>Wayback // Archive Intercept</b>
-			<nav class="site-nav" aria-label="Main"><a href="/">Home</a> · <a href="/urls">Searched URLs</a> · <a href="/operations">Operations</a> · <a href="/about">About</a></nav>
+			<nav class="site-nav" aria-label="Main"><a href="/">Home</a><a href="/urls">Searched URLs</a><a href="/operations">Operations</a><a href="/about">About</a></nav>
 			<span>Secure channel established</span>
 			<span class="clock" id="spyClock" aria-hidden="true"></span>
 			<span class="theme-switch">
