@@ -1,4 +1,44 @@
 <Solution>
+  <Folder Name="/docs/popularity/">
+    <File Path="docs/popularity/evaluation.md" />
+    <File Path="docs/popularity/experiments.md" />
+    <File Path="docs/popularity/GUIDE.md" />
+    <File Path="docs/popularity/ontology.md" />
+    <File Path="docs/popularity/README.md" />
+    <File Path="docs/popularity/roadmap.md" />
+    <File Path="docs/popularity/runbook.md" />
+    <File Path="docs/popularity/scoring.md" />
+    <File Path="docs/popularity/signals.md" />
+  </Folder>
+  <Folder Name="/.github/agents/">
+    <File Path=".github/agents/architect.agent.md" />
+    <File Path=".github/agents/eval-guardian.agent.md" />
+    <File Path=".github/agents/implementer.agent.md" />
+    <File Path=".github/agents/popularity-analyst.agent.md" />
+    <File Path=".github/agents/reviewer.agent.md" />
+    <File Path=".github/agents/security-reviewer.agent.md" />
+    <File Path=".github/agents/signal-engineer.agent.md" />
+    <File Path=".github/agents/test-writer.agent.md" />
+  </Folder>
+  <Folder Name="/.github/prompts/">
+    <File Path=".github/prompts/add-gold-case.prompt.md" />
+    <File Path=".github/prompts/add-tests.prompt.md" />
+    <File Path=".github/prompts/diagnose-ranking.prompt.md" />
+    <File Path=".github/prompts/fix-bug.prompt.md" />
+    <File Path=".github/prompts/implement-feature.prompt.md" />
+    <File Path=".github/prompts/improve-popularity.prompt.md" />
+    <File Path=".github/prompts/master-plan.prompt.md" />
+    <File Path=".github/prompts/review-changes.prompt.md" />
+    <File Path=".github/prompts/roadmap.prompt.md" />
+    <File Path=".github/prompts/security-check.prompt.md" />
+  </Folder>
+  <Folder Name="/.github/instructions/">
+    <File Path=".github/instructions/popularity.instructions.md" />
+    <File Path=".github/instructions/services.instructions.md" />
+    <File Path=".github/instructions/storage.instructions.md" />
+    <File Path=".github/instructions/tests.instructions.md" />
+    <File Path=".github/instructions/web.instructions.md" />
+  </Folder>
   <Project Path="src/WaybackViewer/WaybackViewer.csproj" />
   <Project Path="tests/WaybackViewer.Tests/WaybackViewer.Tests.csproj" />
 </Solution>
