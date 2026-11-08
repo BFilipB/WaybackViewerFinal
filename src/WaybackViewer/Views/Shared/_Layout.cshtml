@@ -1,4 +1,4 @@
-﻿@inject Microsoft.AspNetCore.Antiforgery.IAntiforgery Antiforgery
+@inject Microsoft.AspNetCore.Antiforgery.IAntiforgery Antiforgery
 <!DOCTYPE html>
 <html>
 	<head>
@@ -282,8 +282,6 @@
 @@media (max-width: 1000px) { .hide-sm { display: none; } }
 @@media (max-width: 760px) {
   .hide-xs { display: none; }
-  #opsTable { table-layout: auto; min-width: 640px; }
-  #opsTable col { width: auto !important; }
   .ops-table th, .ops-table td { padding: 4px 6px; }
   .ops-filters input, .ops-filters select { flex: 1 1 140px; min-width: 0; }
   .pager { flex-wrap: wrap; }

@@ -11,8 +11,8 @@ public class DisplayFormatTests
     [InlineData("20200728180718", "2020-07-28")]
     [InlineData("20261107054657", "2026-11-07")]
     [InlineData("20200728", "2020-07-28")]
-    [InlineData(null, "–")]
-    [InlineData("", "–")]
+    [InlineData(null, "\u2013")]
+    [InlineData("", "\u2013")]
     [InlineData("garbage", "garbage")]
     public void Timestamp_is_formatted_cleanly(string? input, string expected) =>
         Assert.Equal(expected, DisplayFormat.Timestamp(input));
