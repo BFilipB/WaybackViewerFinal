@@ -17,11 +17,11 @@ public class OperationStoreTests
     }
 
     [Fact]
-    public async Task Stopped_operation_can_be_created_again()
+    public async Task Finished_operation_can_be_created_again()
     {
         var store = new InMemoryArchiveStore();
         var first = await store.CreateOrGetOperationAsync("example.com/", "html200", OperationKind.PagePreload, DateTimeOffset.UtcNow);
-        await store.UpdateOperationAsync(first with { State = OperationState.Stopped, UpdatedAt = DateTimeOffset.UtcNow });
+        await store.UpdateOperationAsync(first with { State = OperationState.Completed, UpdatedAt = DateTimeOffset.UtcNow });
 
         var next = await store.CreateOrGetOperationAsync("example.com/", "html200", OperationKind.PagePreload, DateTimeOffset.UtcNow);
 

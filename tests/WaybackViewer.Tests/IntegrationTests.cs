@@ -38,7 +38,8 @@ public sealed class AppHost : IAsyncDisposable
         await app.StartAsync();
 
         var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.First();
-        var client = new HttpClient(new HttpClientHandler { AllowAutoRedirect = false }) { BaseAddress = new Uri(address) };
+        var client = new HttpClient(new AntiforgeryHandler(new HttpClientHandler { AllowAutoRedirect = false, CookieContainer = new System.Net.CookieContainer() }))
+            { BaseAddress = new Uri(address) };
         return new AppHost
         {
             App = app, Client = client, Archive = archive,
@@ -71,6 +72,56 @@ public class RateLimitAndOperationsEndpointTests
 
         Assert.Equal(HttpStatusCode.OK, first.StatusCode);
         Assert.Equal((HttpStatusCode)429, second.StatusCode);
+    }
+
+    [Fact]
+    public async Task Retry_failed_resets_failed_captures_and_downloads_them_again()
+    {
+        await using var host = await AppHost.StartAsync();
+        var captures = SampleData.Captures(2);
+        await host.Store!.SaveSearchAsync("example.com/", "html200", captures, DateTimeOffset.UtcNow);
+        await host.Store.SaveOutcomesAsync([new CaptureOutcome(captures[0], PreloadOutcome.Failed, "http-503", DateTimeOffset.UtcNow)]);
+        host.RouteSite("example.com/", captures);
+
+        var response = await host.Client.PostAsync("/Home/RetryFailed?url=example.com/&filter=html200", null);
+        response.EnsureSuccessStatusCode();
+        using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(1, doc.RootElement.GetProperty("reset").GetInt32());
+        await SampleData.Eventually(async () => await host.Store.GetPageAsync(captures[0].Timestamp, captures[0].Original, false) is not null);
+        Assert.Empty(await host.Store.GetOutcomesAsync("example.com/", "html200"));
+    }
+
+    [Fact]
+    public async Task Retry_failed_rejects_invalid_urls()
+    {
+        await using var host = await AppHost.StartAsync();
+        var response = await host.Client.PostAsync("/Home/RetryFailed?url=" + Uri.EscapeDataString("bad url"), null);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Stop_endpoint_no_longer_exists()
+    {
+        await using var host = await AppHost.StartAsync();
+        var response = await host.Client.PostAsync("/Home/Stop?url=example.com/", null);
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Post_without_antiforgery_token_is_rejected()
+    {
+        await using var host = await AppHost.StartAsync();
+        using var raw = new HttpClient { BaseAddress = host.Client.BaseAddress };
+        var response = await raw.PostAsync("/Home/RetryFailed?url=example.com/&filter=html200", null);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Layout_exposes_antiforgery_token_for_scripts()
+    {
+        await using var host = await AppHost.StartAsync();
+        var html = await host.GetAsync("/");
+        Assert.Matches("<meta name=\"request-verification-token\" content=\"[^\"]+\"", html);
     }
 }
 

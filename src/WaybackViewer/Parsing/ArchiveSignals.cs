@@ -44,6 +44,34 @@ public static class ArchiveSignals
         return merged;
     }
 
+    public static string HostOf(string url) => Host(url);
+
+    /// Streaming form of Fill's raw signal (how often a URL was captured + how many captured URLs sit below it),
+    /// so the signal can be persisted per capture without holding capture rows: Add every original, Seal, then Raw.
+    public sealed class SignalIndex
+    {
+        private readonly Dictionary<string, int> perUrl = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, int> below = new(StringComparer.OrdinalIgnoreCase);
+
+        public void Add(string original) => perUrl[original] = perUrl.GetValueOrDefault(original) + 1;
+
+        public void Seal()
+        {
+            below.Clear();
+            foreach (var url in perUrl.Keys)
+            {
+                var p = url.TrimEnd('/');
+                for (var i = p.LastIndexOf('/'); i > 8; i = p.LastIndexOf('/'))
+                {
+                    p = p[..i];
+                    below[p] = below.GetValueOrDefault(p) + 1;
+                }
+            }
+        }
+
+        public int Raw(string original) =>
+            (int)(Math.Min(perUrl[original] * 5L, 60) + Math.Min(below.GetValueOrDefault(original.TrimEnd('/')) * 2L, 40));
+    }
     private static string Host(string url) =>
         Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host.ToLowerInvariant() : "";
 

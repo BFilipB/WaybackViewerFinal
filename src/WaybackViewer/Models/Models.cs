@@ -1,4 +1,4 @@
-﻿using System.Globalization;
+using System.Globalization;
 using System.Text.Json.Serialization;
 
 namespace WaybackViewer.Models;
@@ -53,17 +53,32 @@ public sealed record StoredPage(Capture Capture, byte[]? HtmlGz, ParsedPage Pars
 
 public sealed record PageText(string? Title, string? Description, string Text, string? Error = null);
 
-public sealed record JobProgress(string Prefix, string Filter, OperationState State, int Queued, int InFlight, int Completed, int Total);
+public sealed record JobProgress(string Prefix, string Filter, OperationState State, int Queued, int InFlight, int Completed, int Total,
+    int Failed = 0, int Skipped = 0, double PerSecond = 0, double? EtaSeconds = null);
 
 public sealed record PreloadStatus(int Total, int Completed, int Failed, bool Running, double PerSecond = 0,
     int Queued = 0, int InFlight = 0, int ActiveWorkers = 0, double? EtaSeconds = null,
-    IReadOnlyList<JobProgress>? Jobs = null);
+    IReadOnlyList<JobProgress>? Jobs = null, int Skipped = 0);
+
+/// Terminal preload result of a capture that was not saved. Saved captures are recognised by their stored page.
+public enum PreloadOutcome
+{
+    Skipped = 1,
+    Failed = 2
+}
+
+/// Why a capture is not (or could not be) preloaded. Reason: non-html, not-found, redirect, http-NNN, network, timeout, error.
+public sealed record CaptureOutcome(Capture Capture, PreloadOutcome Outcome, string Reason, DateTimeOffset At);
 
 public enum OperationKind
 {
     CaptureLoad,
     WaybackRefresh,
-    PagePreload
+    PagePreload,
+    /// Removes the preloaded pages of a searched URL (the capture list is kept).
+    DeletePages,
+    /// Removes everything stored for a searched URL.
+    DeleteAll
 }
 
 public enum OperationState
@@ -75,7 +90,11 @@ public enum OperationState
     Stopped,
     Interrupted,
     Completed,
-    Failed
+    Failed,
+    /// Finished: every capture reached a final result, but some of them failed.
+    CompletedWithFailures,
+    /// Being removed (Phase 4). Terminal: no further transitions.
+    Deleting
 }
 
 public sealed record BackgroundOperation(
@@ -92,7 +111,7 @@ public sealed record BackgroundOperation(
     string? Error = null)
 {
     public string Key => $"{Kind}|{Filter}|{Prefix}";
-    public bool IsActive => State is OperationState.Queued or OperationState.Running or OperationState.Paused or OperationState.Stopping;
+    public bool IsActive => OperationStates.IsActive(State);
 }
 
 public sealed record OperationStatus(
@@ -120,7 +139,18 @@ public sealed record WorkflowStatusView(
     string Message,
     WorkflowBar CaptureLoad,
     WorkflowBar Preload,
-    IReadOnlyList<WorkflowEvent> Timeline);
+    IReadOnlyList<WorkflowEvent> Timeline,
+    /// Other searched URLs that currently have unfinished operations (shown as a link to the Operations page).
+    int OtherActiveUrls = 0);
+
+/// One searched URL (prefix + capture filter).
+public readonly record struct SearchKey(string Prefix, string Filter);
+
+/// Operations page query: which searched URLs to list. Null Kinds/States = no filter.
+public sealed record OperationListQuery(IReadOnlyList<OperationKind>? Kinds, IReadOnlyList<OperationState>? States,
+    int Offset, int Limit);
+
+public sealed record OperationSearchPage(IReadOnlyList<SearchKey> Searches, int Total);
 
 public sealed record PopularityPreset(int Percent, int Value);
 

@@ -8,6 +8,7 @@ namespace WaybackViewer.Services;
 public sealed class FacetCache
 {
     private const int MaxEntries = 64;
+    private readonly ConcurrentQueue<(long SearchId, int Count)> order = new();
     private readonly ConcurrentDictionary<(long SearchId, int Count), CaptureFacets> cache = new();
 
     // ---- filtered views --------------------------------------------------------------------------------
@@ -48,8 +49,8 @@ public sealed class FacetCache
         if (cache.TryGetValue(key, out var hit)) return hit;
 
         var built = CaptureFacets.Build(snapshot.Captures);
-        if (cache.Count >= MaxEntries) cache.Clear();
-        cache[key] = built;
+        while (cache.Count >= MaxEntries && order.TryDequeue(out var oldest)) cache.TryRemove(oldest, out _);   // evict oldest, never drop everything
+        if (cache.TryAdd(key, built)) order.Enqueue(key);
         return built;
     }
 }

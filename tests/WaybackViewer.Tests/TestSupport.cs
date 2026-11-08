@@ -46,6 +46,9 @@ public sealed class SlowOperationStore : IArchiveStore
     public Task<IReadOnlyList<long>> MatchCaptureIdsAsync(string query, CancellationToken ct = default) => inner.MatchCaptureIdsAsync(query, ct);
     public Task<IReadOnlyDictionary<string, PageMetadata>> GetPopularityMetadataAsync(string prefix, string filter, CancellationToken ct = default) => inner.GetPopularityMetadataAsync(prefix, filter, ct);
     public Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default) => inner.SavePagesAsync(pages, ct);
+    public Task SaveOutcomesAsync(IReadOnlyList<CaptureOutcome> outcomes, CancellationToken ct = default) => inner.SaveOutcomesAsync(outcomes, ct);
+    public Task<IReadOnlyDictionary<string, CaptureOutcome>> GetOutcomesAsync(string prefix, string filter, CancellationToken ct = default) => inner.GetOutcomesAsync(prefix, filter, ct);
+    public Task<int> ResetFailedAsync(string prefix, string filter, CancellationToken ct = default) => inner.ResetFailedAsync(prefix, filter, ct);
     public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind, CancellationToken ct = default)
     {
         lock (gate)
@@ -113,6 +116,14 @@ public sealed class DelayedSaveStore : IArchiveStore
     private readonly InMemoryArchiveStore inner = new();
     public TaskCompletionSource SaveStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource SaveGate { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    /// The first N page saves throw (simulates a temporarily failing database).
+    public int FailFirstSaves { get; set; }
+    public int SaveCalls => saveCalls;
+    private int saveCalls;
+
+    public Task SaveOutcomesAsync(IReadOnlyList<CaptureOutcome> outcomes, CancellationToken ct = default) => inner.SaveOutcomesAsync(outcomes, ct);
+    public Task<IReadOnlyDictionary<string, CaptureOutcome>> GetOutcomesAsync(string prefix, string filter, CancellationToken ct = default) => inner.GetOutcomesAsync(prefix, filter, ct);
+    public Task<int> ResetFailedAsync(string prefix, string filter, CancellationToken ct = default) => inner.ResetFailedAsync(prefix, filter, ct);
 
     public Task InitializeAsync(CancellationToken ct = default) => inner.InitializeAsync(ct);
     public Task<SearchSnapshot?> GetSearchAsync(string prefix, string filter, CancellationToken ct = default) => inner.GetSearchAsync(prefix, filter, ct);
@@ -125,6 +136,7 @@ public sealed class DelayedSaveStore : IArchiveStore
     public async Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default)
     {
         SaveStarted.TrySetResult();
+        if (Interlocked.Increment(ref saveCalls) <= FailFirstSaves) throw new InvalidOperationException("database locked");
         await SaveGate.Task.WaitAsync(ct);
         await inner.SavePagesAsync(pages, ct);
     }
@@ -197,7 +209,7 @@ public sealed class FakePageLoader : IPageLoader
     {
         Started.Enqueue(capture.Key);
         if (Hook is not null) await Hook(capture);
-        if (FailKeys.ContainsKey(capture.Key)) throw new HttpRequestException("boom");
+        if (FailKeys.ContainsKey(capture.Key)) throw new HttpRequestException("boom", null, HttpStatusCode.Forbidden);   // permanent
         var html = SampleData.Html(capture.Original, "Hello " + capture.Timestamp);
         return new NewPage(capture, HtmlCodec.Compress(html), PageParser.Parse(html), DateTimeOffset.UtcNow);
     }
@@ -212,6 +224,9 @@ public sealed class ThrowingSaveStore : IArchiveStore
     public Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> captures, DateTimeOffset cachedAt, CancellationToken ct = default) => throw new NotSupportedException();
     public Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default) => Task.FromResult<StoredPage?>(null);
     public Task SavePagesAsync(IReadOnlyList<NewPage> pages, CancellationToken ct = default) => throw new InvalidOperationException("disk full");
+    public Task SaveOutcomesAsync(IReadOnlyList<CaptureOutcome> outcomes, CancellationToken ct = default) => throw new InvalidOperationException("disk full");
+    public Task<IReadOnlyDictionary<string, CaptureOutcome>> GetOutcomesAsync(string prefix, string filter, CancellationToken ct = default) => Task.FromResult<IReadOnlyDictionary<string, CaptureOutcome>>(new Dictionary<string, CaptureOutcome>());
+    public Task<int> ResetFailedAsync(string prefix, string filter, CancellationToken ct = default) => Task.FromResult(0);
     public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind, CancellationToken ct = default) => Task.FromResult<BackgroundOperation?>(null);
     public Task<BackgroundOperation> CreateOrGetOperationAsync(string prefix, string filter, OperationKind kind, DateTimeOffset now, CancellationToken ct = default) => throw new NotSupportedException();
     public Task<BackgroundOperation?> GetOperationAsync(long id, CancellationToken ct = default) => Task.FromResult<BackgroundOperation?>(null);
@@ -254,4 +269,36 @@ public static class SampleData
 
     public static async Task Eventually(Func<bool> condition, int timeoutMs = 10_000) =>
         await Eventually(() => Task.FromResult(condition()), timeoutMs);
+}
+
+/// Test client handler that behaves like the page script: it reads the antiforgery token from the layout's
+/// meta tag once (the cookie is kept by the inner handler) and sends it with every POST.
+public sealed class AntiforgeryHandler(HttpMessageHandler inner) : DelegatingHandler(inner)
+{
+    private readonly SemaphoreSlim tokenLock = new(1, 1);
+    private string? token;
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (request.Method == HttpMethod.Post && !request.Headers.Contains("X-CSRF-TOKEN"))
+            request.Headers.Add("X-CSRF-TOKEN", await GetTokenAsync(request.RequestUri!, cancellationToken));
+        return await base.SendAsync(request, cancellationToken);
+    }
+
+    private async Task<string> GetTokenAsync(Uri target, CancellationToken ct)
+    {
+        await tokenLock.WaitAsync(ct);
+        try
+        {
+            if (token is not null) return token;
+            using var page = new HttpRequestMessage(HttpMethod.Get, new Uri(target, "/"));
+            using var response = await base.SendAsync(page, ct);
+            response.EnsureSuccessStatusCode();
+            var html = await response.Content.ReadAsStringAsync(ct);
+            var match = System.Text.RegularExpressions.Regex.Match(html, "<meta name=\"request-verification-token\" content=\"([^\"]+)\"");
+            if (!match.Success) throw new InvalidOperationException("The page has no antiforgery token.");
+            return token = System.Net.WebUtility.HtmlDecode(match.Groups[1].Value);
+        }
+        finally { tokenLock.Release(); }
+    }
 }

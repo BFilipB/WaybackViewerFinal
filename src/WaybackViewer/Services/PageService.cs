@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Net;
+using Microsoft.Extensions.Logging.Abstractions;
 using WaybackViewer.Models;
 using WaybackViewer.Parsing;
 using WaybackViewer.Storage;
@@ -7,8 +9,10 @@ namespace WaybackViewer.Services;
 
 /// One page on demand: the database if we have it, otherwise download -> save -> return.
 /// Concurrent requests for the same missing page share a single download and a single database write.
-public sealed class PageService(IArchiveStore store, IPageLoader loader, PreloadCoordinator preload)
+public sealed class PageService(IArchiveStore store, IPageLoader loader, PreloadCoordinator preload,
+    ILogger<PageService>? logger = null)
 {
+    private readonly ILogger<PageService> log = logger ?? NullLogger<PageService>.Instance;
     private readonly ConcurrentDictionary<string, Lazy<Task<NewPage?>>> loads = new(StringComparer.Ordinal);
 
     public async Task<StoredPage?> GetAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default)
@@ -25,6 +29,10 @@ public sealed class PageService(IArchiveStore store, IPageLoader loader, Preload
             ? null
             : new StoredPage(page.Capture, includeHtml ? page.HtmlGz : null, page.Parsed, page.FetchedAt);
     }
+
+    /// True when the capture is already saved (metadata only: the HTML payload is not read).
+    public async Task<bool> IsStoredAsync(string timestamp, string original, CancellationToken ct = default) =>
+        await store.GetPageAsync(timestamp, original, includeHtml: false, ct).ConfigureAwait(false) is not null;
 
     private static bool HasEstimate(PageMetadata m) =>
         m.Views.HasValue || m.Likes.HasValue || m.Comments.HasValue || m.Shares.HasValue || m.Score.HasValue || m.EngagementScore is > 0;
@@ -59,9 +67,16 @@ public sealed class PageService(IArchiveStore store, IPageLoader loader, Preload
             {
                 page = await loader.LoadAsync(new Capture(timestamp, original, "text/html", "200")).ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception ex) when (ex is InvalidDataException ||
+                ex is HttpRequestException { StatusCode: HttpStatusCode.NotFound or HttpStatusCode.Gone })
             {
-                return null;
+                log.LogInformation("Capture {Key} is not available as HTML ({Reason})", key, ex.GetType().Name);
+                return null;   // not found / not HTML: a normal outcome, the caller shows "could not be loaded"
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Loading capture {Key} on demand failed", key);
+                return null;   // transient or permanent archive failure; already logged with details
             }
 
             await store.SavePagesAsync([page]).ConfigureAwait(false);

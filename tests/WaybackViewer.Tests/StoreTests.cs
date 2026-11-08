@@ -14,7 +14,8 @@ public static class StoreScenarios
         nameof(ResavingReplacesMembershipButKeepsPages), nameof(FiltersAreIndependent), nameof(ReadyFlagFollowsSavedPages),
         nameof(PageWithAndWithoutHtml), nameof(UnknownPageIsNull), nameof(SavingAPageTwiceOverwrites),
         nameof(DuplicatesInOneSaveAreStoredOnce), nameof(SavingUnknownCaptureCreatesIt), nameof(UnicodeAndVeryLongUrls), nameof(MetadataRoundTrips),
-        nameof(LargeSearchRoundTrip), nameof(PagedSearchRetrieval), nameof(ConcurrentSavesDoNotCollide)
+        nameof(LargeSearchRoundTrip), nameof(PagedSearchRetrieval), nameof(ConcurrentSavesDoNotCollide),
+        nameof(OutcomesRoundTripAndResetFailed)
     ];
 
     private static string Unique() => "t" + Guid.NewGuid().ToString("N")[..12];
@@ -212,6 +213,33 @@ public static class StoreScenarios
         Assert.Equal(Enumerable.Range(0, 8).SelectMany(w => caps.Skip(w * 3).Take(20)).Distinct().Count(), loaded.Captures.Count(c => c.Ready));
     }
 
+    public static async Task OutcomesRoundTripAndResetFailed(IArchiveStore store)
+    {
+        var tag = Unique();
+        var caps = Enumerable.Range(0, 4).Select(i => Cap(tag, i)).ToList();
+        await store.SaveSearchAsync(tag, "html200", caps, DateTimeOffset.UtcNow);
+        Assert.Empty(await store.GetOutcomesAsync(tag, "html200"));
+
+        var at = DateTimeOffset.FromUnixTimeMilliseconds(1_700_000_000_000);
+        await store.SaveOutcomesAsync([
+            new CaptureOutcome(caps[0], PreloadOutcome.Skipped, "not-found", at),
+            new CaptureOutcome(caps[1], PreloadOutcome.Failed, "http-503", at),
+            new CaptureOutcome(caps[2], PreloadOutcome.Failed, "network", at)]);
+        await store.SaveOutcomesAsync([new CaptureOutcome(caps[2], PreloadOutcome.Failed, "timeout", at)]);   // upsert
+        await store.SavePagesAsync([Page(caps[1])]);   // a saved page wins over an old outcome
+
+        var outcomes = await store.GetOutcomesAsync(tag, "html200");
+        Assert.Equal(2, outcomes.Count);
+        Assert.Equal((PreloadOutcome.Skipped, "not-found", at), (outcomes[caps[0].Key].Outcome, outcomes[caps[0].Key].Reason, outcomes[caps[0].Key].At));
+        Assert.Equal("timeout", outcomes[caps[2].Key].Reason);
+        Assert.Empty(await store.GetOutcomesAsync(tag, "other"));
+
+        Assert.Equal(2, await store.ResetFailedAsync(tag, "html200"));   // includes the saved page's stale row
+        var left = await store.GetOutcomesAsync(tag, "html200");
+        Assert.Equal(caps[0].Key, Assert.Single(left).Key);
+        Assert.Equal(0, await store.ResetFailedAsync(tag, "html200"));
+    }
+
     public static async Task Run(string name, IArchiveStore store)
     {
         var method = typeof(StoreScenarios).GetMethod(name, BindingFlags.Public | BindingFlags.Static)
@@ -240,11 +268,12 @@ public class InMemoryArchiveStoreTests
     [InlineData(nameof(StoreScenarios.LargeSearchRoundTrip))]
     [InlineData(nameof(StoreScenarios.PagedSearchRetrieval))]
     [InlineData(nameof(StoreScenarios.ConcurrentSavesDoNotCollide))]
+    [InlineData(nameof(StoreScenarios.OutcomesRoundTripAndResetFailed))]
     public Task Scenario(string name) => StoreScenarios.Run(name, new InMemoryArchiveStore());
 
     [Fact]
     public void Every_scenario_is_covered_by_the_theory() =>
-        Assert.Equal(16, StoreScenarios.Names.Length);
+        Assert.Equal(17, StoreScenarios.Names.Length);
 }
 
 public class ArchiveStoreContractTests
@@ -309,6 +338,7 @@ public class SqliteArchiveStoreTests : IDisposable
     [InlineData(nameof(StoreScenarios.LargeSearchRoundTrip))]
      [InlineData(nameof(StoreScenarios.PagedSearchRetrieval))]
     [InlineData(nameof(StoreScenarios.ConcurrentSavesDoNotCollide))]
+    [InlineData(nameof(StoreScenarios.OutcomesRoundTripAndResetFailed))]
     public Task Scenario(string name) => StoreScenarios.Run(name, NewStore());
 
     [Fact]

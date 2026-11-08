@@ -1,0 +1,17 @@
+@model string
+@{
+	ViewData["Title"] = "About";
+}
+<section class="ops-page">
+<h1>About Wayback Viewer</h1>
+<p>Wayback Viewer browses the captures that the Internet Archive's Wayback Machine holds for a web address. It loads the capture list for a URL prefix, preloads the archived pages in the background and lets you filter, search and read them.</p>
+<h2>How to use</h2>
+<ol>
+<li>Enter a URL prefix on the <a href="/">Home</a> page. The capture list loads in the background.</li>
+<li>Page preloading runs separately; follow both on the progress bars and the timeline.</li>
+<li>Browse earlier searches on <a href="/urls">Searched URLs</a> and manage background work on <a href="/operations">Operations</a>.</li>
+</ol>
+<h2>Attribution</h2>
+<p>Captures and metadata come from the <a href="https://archive.org" rel="noopener" target="_blank">Internet Archive</a> and its <a href="https://web.archive.org" rel="noopener" target="_blank">Wayback Machine</a>. This project is not affiliated with the Internet Archive. Please respect its terms of use.</p>
+<p>Version @Model</p>
+</section>

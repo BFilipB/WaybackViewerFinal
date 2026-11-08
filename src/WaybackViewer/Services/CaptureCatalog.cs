@@ -19,6 +19,9 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
         return lazy.Value.WaitAsync(ct); // concurrent identical requests share one CDX download
     }
 
+    /// Raised after a capture list was downloaded and saved (initial load or refresh), so new captures can be preloaded.
+    public event Func<string, string, SearchSnapshot, Task>? Saved;
+
     private readonly object refreshLock = new();
     private readonly HashSet<string> refreshingKeys = new(StringComparer.Ordinal);
     private readonly List<Task> refreshTasks = new();
@@ -43,6 +46,14 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
     public Task WhenRefreshesDoneAsync()
     {
         lock (refreshLock) return Task.WhenAll(refreshTasks.ToArray());
+    }
+
+    /// Freshness of a saved, unexpired list without loading its captures; null when a load/refresh is needed.
+    public async Task<CatalogState?> TryGetFreshStateAsync(string prefix, string filter, bool refresh, CancellationToken ct = default)
+    {
+        if (refresh) return null;
+        var head = await store.GetSearchPageAsync(prefix, filter, 0, 0, ct).ConfigureAwait(false);
+        return head is null || IsExpired(head.CachedAt) ? null : new CatalogState(head.CachedAt, true, false);
     }
 
     public async Task<bool> HasFreshSnapshotAsync(string prefix, string filter, CancellationToken ct = default)
@@ -72,6 +83,8 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
         var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;
         var operation = await store.CreateOrGetOperationAsync(prefix, filter, kind, DateTimeOffset.UtcNow)
             .ConfigureAwait(false);
+        if (OperationStates.Normalize(operation.State) == OperationState.Paused && saved is not null)
+            return new CatalogResult(saved, true);   // paused by the user: keep serving the saved list, do not download
         operation = operation with { State = OperationState.Running, UpdatedAt = DateTimeOffset.UtcNow };
         await store.UpdateOperationAsync(operation).ConfigureAwait(false);
 
@@ -92,7 +105,7 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
             {
                 State = OperationState.Failed,
                 UpdatedAt = DateTimeOffset.UtcNow,
-                Error = ex.Message
+                Error = DescribeFailure(ex)
             }).ConfigureAwait(false);
             throw;
         }
@@ -101,6 +114,9 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
         var now = new DateTimeOffset(DateTime.SpecifyKind(time.UtcNow, DateTimeKind.Utc));
         var snapshot = await store.SaveSearchAsync(prefix, filter, captures, now).ConfigureAwait(false);
         await CompleteAsync(operation, snapshot.Captures.Count).ConfigureAwait(false);
+        if (Saved is { } handler)
+            foreach (var h in handler.GetInvocationList().Cast<Func<string, string, SearchSnapshot, Task>>())
+                await h(prefix, filter, snapshot).ConfigureAwait(false);
         return new CatalogResult(snapshot, false);
     }
 
@@ -115,6 +131,15 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
             Error = error
         }).ConfigureAwait(false);
     }
+
+    /// Client-safe description of a capture-list failure (never the raw exception message).
+    public static string DescribeFailure(Exception ex) => ex switch
+    {
+        ArchiveRequestException a => $"Wayback answered HTTP {(int)a.StatusCode}.",
+        HttpRequestException => "Wayback could not be reached.",
+        TimeoutException or TaskCanceledException => "Wayback did not answer in time.",
+        _ => "Loading the capture list failed."
+    };
 
     private bool IsExpired(DateTimeOffset cachedAt)
     {

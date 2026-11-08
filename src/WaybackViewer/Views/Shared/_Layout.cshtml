@@ -1,13 +1,15 @@
+@inject Microsoft.AspNetCore.Antiforgery.IAntiforgery Antiforgery
 <!DOCTYPE html>
 <html>
 	<head>
+		<meta name="request-verification-token" content="@(Antiforgery.GetAndStoreTokens(Context).RequestToken)">
 		<!-- Chrome/Edge: start loading a list page when you hover its link, so the click is instant. Links that trigger
        work (refresh from Wayback, download everything) are excluded. Other browsers ignore this block. -->
 		<script type="speculationrules">
 			{"prefetch":[{"where":{"and":[{"href_matches":"/?*"},{"not":{"href_matches":"/*?*refresh=*"}},{"not":{"href_matches":"/*?*downloadAll=*"}}]},"eagerness":"moderate"}]}
 		</script>
 		<meta charset="utf-8" />
-		<script>try { var d = document.documentElement; d.setAttribute('data-theme', localStorage.getItem('wb-theme') || 'midnight-command'); d.setAttribute('data-layout', localStorage.getItem('wb-layout') || 'classic'); } catch (e) { }</script>
+		<script>try { var d = document.documentElement; var lt = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches; d.setAttribute('data-theme', localStorage.getItem('wb-theme') || (lt ? 'clean-light' : 'midnight-command')); d.setAttribute('data-motion', localStorage.getItem('wb-motion') || 'rich'); d.setAttribute('data-layout', localStorage.getItem('wb-layout') || 'classic'); } catch (e) { }</script>
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>@ViewData["Title"]</title>
 		<style>
@@ -21,7 +23,7 @@
 			.capture-list { display: flex; flex-direction: column; gap: 6px; max-width: 1100px; }
 			.card { background: #1c1c1c; border: 1px solid #333; display: flex; }
 			.card[hidden] { display: none; }
-			.meta { width: 100%; padding: 8px 10px; display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; font-size: 12px; }
+			.meta { width: 100%; padding: calc(var(--row-pad) + 2px) 10px; display: grid; grid-template-columns: 150px minmax(0, 1fr) auto; gap: 4px 12px; align-items: center; font-size: 12px; }
 			.capture-date { color: #bbb; white-space: nowrap; }
 			.url { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 			.capture-details { color: #999; grid-column: 2; }
@@ -39,10 +41,10 @@
 			.ssframe { flex: 1; min-width: 0; border: 1px solid #3a4150; border-top: 26px solid #2b303b; border-radius: 10px; background: #fff;
 			box-shadow: 0 12px 40px rgba(0,0,0,.6); }
 			.ssframe[hidden] { display: none; }
-			.card { border-radius: 8px; transition: border-color .15s, transform .15s; }
+			.card { border-radius: var(--radius); box-shadow: var(--shadow); transition: border-color .15s, transform .15s; }
 			.card:hover { border-color: #5b8bd0; transform: translateX(2px); }
 			.ssbar { background: #151922; border-bottom: 1px solid #2a2f3a; }
-			button, .btn { border-radius: 6px; }
+			button, .btn { border-radius: var(--radius-sm); }
 			.capture-row { content-visibility: auto; contain-intrinsic-size: auto 58px; }
 			.ssreader { flex: 1; min-width: 0; overflow: auto; padding: 24px 32px; background: #161a22; border: 1px solid #2a2f3a; border-radius: 10px; }
 			.ssreader[hidden] { display: none; }
@@ -79,7 +81,7 @@
 			.wf-track i.wf-on { background: var(--accent); }
 			.wf-track i.wf-done { background: var(--ok); }
 			.wf-track i.wf-err { background: #c55; }
-			.wf-row em { color: var(--text); font-style: normal; font-family: ui-monospace, Consolas, monospace; font-size: 11px; }
+			.wf-row em { color: var(--text); font-style: normal; font-family: var(--font-mono); font-size: 11px; }
 			.pager { max-width: 1100px; display: flex; gap: 10px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
 			.pager span { color: #bbb; font-size: 13px; }
 			/* ---- instant feel: crossfade between pages, instant click feedback ---- */
@@ -100,8 +102,23 @@
 			.folded { color: var(--muted); }
 			/* ---- spy / dossier theme ---- */
 			:root { --bg: #111418; --panel: #1c2127; --panel2: #252a31; --line: #383e47; --text: #d3d8de; --muted: #8f99a8;
-			--accent: #4c90f0; --accent-d: #2d72d2; --ok: #32a467; --warn: #ec9a3c; }
+			--accent: #4c90f0; --accent-d: #2d72d2; --ok: #32a467; --warn: #ec9a3c;
+			/* design tokens: shape, spacing, depth, type and density (independent of the colour looks) */
+			--radius: 8px; --radius-sm: 6px; --gap: 10px; --shadow: 0 1px 2px rgba(0,0,0,.25); --font-mono: ui-monospace, Consolas, monospace; --row-pad: 6px; }
 			:root[data-theme='midnight-command'] { --bg:#111418; --panel:#1c2127; --panel2:#252a31; --line:#383e47; --text:#d3d8de; --muted:#8f99a8; --accent:#4c90f0; --accent-d:#2d72d2; --ok:#32a467; --warn:#ec9a3c; }
+			:root[data-theme='clean-light'] { --bg:#f5f7fa; --panel:#ffffff; --panel2:#eef1f5; --line:#c9d1da; --text:#1c2430; --muted:#4f5b6b; --accent:#0b5fc5; --accent-d:#084a9b; --ok:#1a7a46; --warn:#9a5b00; color-scheme: light; }
+			:root[data-motion='none'] *, :root[data-motion='none'] *::before, :root[data-motion='none'] *::after { animation: none !important; transition: none !important; }
+			:root[data-motion='subtle'] *, :root[data-motion='subtle'] *::before, :root[data-motion='subtle'] *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: 80ms !important; }
+			@@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+			:root[data-theme='archive-paper'] { --bg:#f3ecda; --panel:#fbf6e8; --panel2:#ece3cb; --line:#b9aa86; --text:#2a2415; --muted:#5a4f35; --accent:#7a3b0c; --accent-d:#5c2b07; --ok:#1d6b3a; --warn:#8a4b00; color-scheme: light; }
+			:root[data-theme='neon-terminal'] { --bg:#000a05; --panel:#03140b; --panel2:#062014; --line:#0f5a33; --text:#b6ffd2; --muted:#6fd69b; --accent:#2dff84; --accent-d:#14b85a; --ok:#2dff84; --warn:#ffd23d; }
+			:root[data-theme='high-contrast'] { --bg:#000000; --panel:#000000; --panel2:#111111; --line:#ffffff; --text:#ffffff; --muted:#e0e0e0; --accent:#ffe600; --accent-d:#ffd000; --ok:#4dff88; --warn:#ffb000; }
+			:root[data-layout='cards'] .capture-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+			:root[data-layout='split'] .workspace { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); max-width: none; }
+			:root[data-layout='split'] .facets { display: none; }
+			:root[data-layout='timeline'] .capture-list { border-left: 2px solid var(--line); margin-left: 12px; padding-left: 14px; display: flex; flex-direction: column; gap: var(--gap); }
+			:root[data-layout='timeline'] .capture-list > * { position: relative; }
+			:root[data-layout='timeline'] .capture-list > *::before { content: ''; position: absolute; left: -22px; top: 14px; width: 10px; height: 10px; border-radius: 50%; background: var(--accent); border: 2px solid var(--bg); }
 			:root[data-theme='obsidian-blue'] { --bg:#0f141b; --panel:#17212b; --panel2:#1f2c38; --line:#304352; --text:#d2dbe5; --muted:#91a1b2; --accent:#3ea8ff; --accent-d:#2a7fc3; --ok:#41b883; --warn:#f0a74a; }
 			:root[data-theme='graphite-amber'] { --bg:#171513; --panel:#231f1b; --panel2:#2d2721; --line:#463b2f; --text:#e0d7cd; --muted:#ab9f93; --accent:#d89a4a; --accent-d:#af7838; --ok:#4da473; --warn:#f0b25c; }
 			:root[data-theme='aurora-steel'] { --bg:#10161a; --panel:#1a242c; --panel2:#22303a; --line:#334651; --text:#d4e1e7; --muted:#8ea3ad; --accent:#57b7c8; --accent-d:#39899a; --ok:#49a16a; --warn:#d9a554; }
@@ -117,7 +134,7 @@
 			letter-spacing: .08em; color: var(--muted); }
 			.spy-header b { color: #fff; font-size: 12px; letter-spacing: .1em; }
 			.spy-header .stamp { margin-left: auto; color: var(--warn); border: 1px solid var(--warn); border-radius: 2px; padding: 1px 6px; font-size: 10px; }
-			.spy-header .clock { font-family: ui-monospace, Consolas, monospace; color: var(--text); }
+			.spy-header .clock { font-family: var(--font-mono); color: var(--text); }
 			.spy-header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
 			.theme-switch { margin-left: 6px; display: inline-flex; align-items: center; gap: 6px; font-size: 10px; color: var(--muted); }
 			.theme-switch label { letter-spacing: .08em; text-transform: uppercase; }
@@ -153,8 +170,8 @@
 			.card { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid #4a515c; border-radius: 2px; transform: none; }
 			.card:hover { border-color: var(--accent); transform: none; background: var(--panel2); }
 			.card[data-ready='1'] { border-left-color: var(--ok); }
-			.capture-date { color: var(--accent); font-family: ui-monospace, Consolas, monospace; }
-			.url { font-family: ui-monospace, Consolas, monospace; }
+			.capture-date { color: var(--accent); font-family: var(--font-mono); }
+			.url { font-family: var(--font-mono); }
 			.capture-details { color: var(--muted); text-transform: uppercase; letter-spacing: .05em; font-size: 11px; }
 			.activity { background: var(--panel); border-color: var(--line); border-radius: 2px; }
 			.activity-head strong { text-transform: uppercase; letter-spacing: .08em; font-size: 11px; color: var(--muted); }
@@ -162,7 +179,7 @@
 			.preload-info, .cache-info { color: var(--muted); }
 			.empty-state { color: var(--muted); }
 			.ssbar { background: var(--panel); border-bottom: 1px solid var(--line); }
-			.ssbar #ssInfo { background: var(--bg); border: 1px solid var(--line); border-radius: 2px; padding: 4px 10px; color: var(--text); font-family: ui-monospace, Consolas, monospace; }
+			.ssbar #ssInfo { background: var(--bg); border: 1px solid var(--line); border-radius: 2px; padding: 4px 10px; color: var(--text); font-family: var(--font-mono); }
 			.ssmain { background: var(--bg); }
 			.ssframe { border: 1px solid var(--line); border-top: 26px solid var(--panel2); border-radius: 2px; box-shadow: 0 8px 28px rgba(0,0,0,.55); }
 			.ssreader { background: var(--panel); border: 1px solid var(--line); border-radius: 2px; color: var(--text); }
@@ -175,7 +192,7 @@
 			.tl-bar { flex: 1 0 34px; max-width: 70px; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; align-items: stretch; text-decoration: none; position: relative; }
 			.tl-fill { display: block; background: #3a5f93; border-radius: 1px 1px 0 0; margin-bottom: 14px; }
 			.tl-bar:hover .tl-fill, .tl-bar.on .tl-fill { background: var(--accent); }
-			.tl-label { position: absolute; bottom: 0; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--muted); font-family: ui-monospace, Consolas, monospace; }
+			.tl-label { position: absolute; bottom: 0; left: 0; right: 0; text-align: center; font-size: 10px; color: var(--muted); font-family: var(--font-mono); }
 			.tl-bar.on .tl-label { color: #fff; }
 			.workspace { display: grid; grid-template-columns: 200px minmax(0, 1fr) 260px; gap: 14px; align-items: start; max-width: 1600px; }
 			.facets, .inspector { background: var(--panel); border: 1px solid var(--line); padding: 4px 12px 12px; position: sticky; top: 8px; max-height: calc(100vh - 16px); overflow: auto; }
@@ -183,7 +200,7 @@
 			.facet { display: flex; justify-content: space-between; gap: 8px; padding: 3px 6px; color: var(--text); text-decoration: none; font-size: 12px; border-left: 2px solid transparent; }
 			.facet:hover { background: var(--panel2); }
 			.facet.on { border-left-color: var(--accent); background: var(--panel2); color: #fff; }
-			.facet em { color: var(--muted); font-style: normal; font-family: ui-monospace, Consolas, monospace; }
+			.facet em { color: var(--muted); font-style: normal; font-family: var(--font-mono); }
 			.facet span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 			.density { margin-bottom: 6px; }
 			.capture-list.compact { gap: 0; }
@@ -195,8 +212,8 @@
 			.insp-empty { color: var(--muted); font-size: 12px; }
 			.inspector dl { margin: 0; font-size: 12px; }
 			.inspector dt { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; margin-top: 8px; }
-			.inspector dd { margin: 2px 0 0; word-break: break-all; font-family: ui-monospace, Consolas, monospace; }
-			.hist { list-style: none; margin: 0; padding: 0; font-size: 12px; font-family: ui-monospace, Consolas, monospace; }
+			.inspector dd { margin: 2px 0 0; word-break: break-all; font-family: var(--font-mono); }
+			.hist { list-style: none; margin: 0; padding: 0; font-size: 12px; font-family: var(--font-mono); }
 			.hist li { padding: 2px 4px; border-left: 2px solid var(--line); }
 			.hist li.cur { border-left-color: var(--accent); color: #fff; background: var(--panel2); }
 			.hist em { color: var(--muted); font-style: normal; }
@@ -220,12 +237,13 @@
 		<header class="spy-header" role="banner">
 			<span class="dot" aria-hidden="true"></span>
 			<b>Wayback // Archive Intercept</b>
+			<nav class="site-nav" aria-label="Main"><a href="/">Home</a> · <a href="/urls">Searched URLs</a> · <a href="/operations">Operations</a> · <a href="/about">About</a></nav>
 			<span>Secure channel established</span>
 			<span class="clock" id="spyClock" aria-hidden="true"></span>
 			<span class="theme-switch">
 				<label for="themeSelect">Theme</label>
 				<select id="themeSelect" aria-label="UI theme">
-					<option value="midnight-command">Midnight Command</option>
+					<option value="midnight-command">Midnight Command</option><option value="clean-light">Clean Light</option><option value="archive-paper">Archive Paper</option><option value="neon-terminal">Neon Terminal</option><option value="high-contrast">High Contrast</option>
 					<option value="obsidian-blue">Obsidian Blue</option>
 					<option value="graphite-amber">Graphite Amber</option>
 					<option value="aurora-steel">Aurora Steel</option>
@@ -241,8 +259,9 @@
 					<option value="classic">Classic</option>
 					<option value="focus">Focus (list only)</option>
 					<option value="wide">Wide</option>
-					<option value="compact">Compact</option>
+					<option value="compact">Compact</option><option value="cards">Cards</option><option value="split">Split view</option><option value="timeline">Timeline</option>
 				</select>
+				<label for="motionSelect">Motion</label><select id="motionSelect" aria-label="Motion"><option value="rich">Rich</option><option value="subtle">Subtle</option><option value="none">None</option></select><label for="soundToggle">Sound</label><input type="checkbox" id="soundToggle" aria-label="Play a sound when an operation finishes" />
 			</span>
 			<span class="stamp" aria-hidden="true">Archive Ops</span>
 		</header>
@@ -251,7 +270,7 @@
 			var c = document.getElementById('spyClock');
 			var themeSelect = document.getElementById('themeSelect');
 			var storageKey = 'wb-theme';
-			var defaultTheme = 'midnight-command';
+			var defaultTheme = (window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches) ? 'clean-light' : 'midnight-command';
 
 			function applyTheme(theme) {
 			document.documentElement.setAttribute('data-theme', theme || defaultTheme);
@@ -299,5 +318,38 @@
 			})();
 		</script>
 		@RenderBody()
+<script>
+(function () {
+// Live operation events (SSE); pages that poll slow down while connected. Opt-in completion sounds.
+var live = window.wbLive = { connected: false };
+var toggle = document.getElementById('soundToggle');
+var soundKey = 'wb-sound';
+try { if (toggle) toggle.checked = localStorage.getItem(soundKey) === '1'; } catch (e) { }
+var lastBeep = 0, ctx = null;
+function beep(freq) {
+try {
+ctx = ctx || new (window.AudioContext || window.webkitAudioContext)();
+var o = ctx.createOscillator(), g = ctx.createGain();
+o.frequency.value = freq; g.gain.value = 0.05; o.connect(g); g.connect(ctx.destination);
+o.start(); o.stop(ctx.currentTime + 0.15);
+} catch (e) { }
+}
+if (toggle) toggle.addEventListener('change', function () { try { localStorage.setItem(soundKey, toggle.checked ? '1' : '0'); } catch (e) { } if (toggle.checked) beep(660); });
+function sound(ev) {
+if (!toggle || !toggle.checked || document.visibilityState !== 'visible' || !ev.terminal) return;
+var now = Date.now(); if (now - lastBeep < 2000) return; lastBeep = now;
+beep(ev.state === 'Failed' ? 220 : ev.failed > 0 ? 440 : 880);
+}
+if (!window.EventSource) return;
+var es = new EventSource('/operations/events');
+es.onopen = function () { live.connected = true; };
+es.onerror = function () { live.connected = false; };
+es.addEventListener('operation', function (m) {
+var ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
+window.dispatchEvent(new CustomEvent('wb-operation', { detail: ev }));
+sound(ev);
+});
+})();
+</script>	<script>(function(){var s=document.getElementById('motionSelect');if(!s)return;s.value=document.documentElement.getAttribute('data-motion')||'rich';s.addEventListener('change',function(){document.documentElement.setAttribute('data-motion',s.value);try{localStorage.setItem('wb-motion',s.value);}catch(e){}});})();</script>
 	</body>
 </html>

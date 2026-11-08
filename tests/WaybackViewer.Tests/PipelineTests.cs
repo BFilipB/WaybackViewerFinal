@@ -106,12 +106,33 @@ public class PreloadCoordinatorTests
     }
 
     [Fact]
-    public async Task A_failing_database_write_is_reported_as_failures()
+    public async Task A_failing_database_write_is_retried_and_never_turns_pages_into_failures()
     {
-        var (coordinator, _, _) = Create(store: new ThrowingSaveStore());
+        var (coordinator, _, loader) = Create(store: new ThrowingSaveStore());
         coordinator.Enqueue(SampleData.Stored(SampleData.Captures(7)));
+        await SampleData.Eventually(() => loader.Started.Count == 7);
+        await Task.Delay(300);
+
+        var status = coordinator.GetStatus();
+        Assert.True(status.Running);          // still trying to save, nothing dropped
+        Assert.Equal(0, status.Failed);
+        Assert.Equal(0, status.Completed);
+        await coordinator.StopAsync(CancellationToken.None);   // shutdown still completes
+    }
+
+    [Fact]
+    public async Task A_database_that_never_recovers_ends_the_job_after_the_save_attempt_limit()
+    {
+        var loader = new FakePageLoader();
+        var options = Options.Create(new PreloadOptions { Workers = 2, WriteBatchSize = 50, WriteMaxDelayMs = 20, SaveMaxAttempts = 2 });
+        using var coordinator = new PreloadCoordinator(loader, new ThrowingSaveStore(), options, NullLogger<PreloadCoordinator>.Instance);
+        coordinator.Enqueue(SampleData.Stored(SampleData.Captures(5)));
         await Idle(coordinator);
-        Assert.Equal((7, 7, 7, false), Counts(coordinator.GetStatus()));
+
+        var status = coordinator.GetStatus();
+        Assert.False(status.Running);
+        Assert.Equal(0, status.Completed);   // nothing was saved ...
+        Assert.Equal(0, status.Failed);      // ... and no capture was blamed for the database error
     }
 
     [Fact]
@@ -190,7 +211,7 @@ public class PreloadCoordinatorTests
             NullLogger<PreloadCoordinator>.Instance);
 
         var captures = SampleData.Stored(SampleData.Captures(8));
-        coordinator.Enqueue(captures, "example.com/", "html200");
+        await coordinator.EnqueueAsync(captures, "example.com/", "html200");
         await Task.Delay(25);
         coordinator.Pause("example.com/", "html200");
         coordinator.Resume("example.com/", "html200");
@@ -199,11 +220,11 @@ public class PreloadCoordinatorTests
         {
             var latest = (await store.GetOperationsAsync())
                 .Single(o => o.Prefix == "example.com/" && o.Filter == "html200" && o.Kind == OperationKind.PagePreload);
-            return latest.State is OperationState.Completed or OperationState.Failed;
+            return latest.State is OperationState.Completed or OperationState.CompletedWithFailures;
         }, timeoutMs: 5000);
 
         var op = (await store.GetOperationsAsync()).Single(o => o.Prefix == "example.com/" && o.Filter == "html200" && o.Kind == OperationKind.PagePreload);
-        Assert.True(op.State is OperationState.Completed or OperationState.Failed);
+        Assert.True(op.State is OperationState.Completed or OperationState.CompletedWithFailures);
         Assert.True(op.Completed + op.Failed >= op.Total);
         Assert.True(store.UpdateCalls > 0);
     }

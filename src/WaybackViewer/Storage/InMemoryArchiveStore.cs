@@ -3,7 +3,7 @@ using WaybackViewer.Models;
 namespace WaybackViewer.Storage;
 
 /// Volatile store: used by the tests and for "Storage:Provider": "Memory". Mirrors SqlArchiveStore semantics.
-public sealed class InMemoryArchiveStore : IArchiveStore
+public sealed partial class InMemoryArchiveStore : IArchiveStore
 {
     private readonly HtmlFileStore htmlFiles;
     private readonly object gate = new();
@@ -17,6 +17,7 @@ public sealed class InMemoryArchiveStore : IArchiveStore
     private readonly Dictionary<long, string> captureSearchText = new();
     private readonly Dictionary<string, BackgroundOperation> operations = new(StringComparer.Ordinal);
     private readonly List<int> saveBatchSizes = new();
+    private readonly Dictionary<long, CaptureOutcome> outcomes = new();
 
     /// Sizes of every SavePagesAsync call (lets tests verify batching).
     public IReadOnlyList<int> SaveBatchSizes { get { lock (gate) return saveBatchSizes.ToArray(); } }
@@ -142,6 +143,42 @@ public sealed class InMemoryArchiveStore : IArchiveStore
             }
         }
         return Task.CompletedTask;
+    }
+
+    public Task SaveOutcomesAsync(IReadOnlyList<CaptureOutcome> list, CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            foreach (var outcome in list)
+                outcomes[EnsureCapture(outcome.Capture)] = outcome;
+        }
+        return Task.CompletedTask;
+    }
+
+    public Task<IReadOnlyDictionary<string, CaptureOutcome>> GetOutcomesAsync(string prefix, string filter, CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            var result = new Dictionary<string, CaptureOutcome>(StringComparer.Ordinal);
+            if (searches.TryGetValue(SearchKey(prefix, filter), out var search))
+                foreach (var id in search.CaptureIds)
+                    if (!pages.ContainsKey(id) && outcomes.TryGetValue(id, out var outcome))
+                        result[outcome.Capture.Key] = outcome;
+            return Task.FromResult<IReadOnlyDictionary<string, CaptureOutcome>>(result);
+        }
+    }
+
+    public Task<int> ResetFailedAsync(string prefix, string filter, CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            if (!searches.TryGetValue(SearchKey(prefix, filter), out var search)) return Task.FromResult(0);
+            var reset = 0;
+            foreach (var id in search.CaptureIds)
+                if (outcomes.TryGetValue(id, out var outcome) && outcome.Outcome == PreloadOutcome.Failed && outcomes.Remove(id))
+                    reset++;
+            return Task.FromResult(reset);
+        }
     }
 
     public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind,

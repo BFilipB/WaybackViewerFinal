@@ -8,7 +8,7 @@ namespace WaybackViewer.Storage.Sql;
 /// One IArchiveStore for every relational database that has an ADO.NET driver. All behaviour (snapshot cache,
 /// write serialisation, batching, paging) lives here; everything database-specific is in the SqlDialect.
 /// SQL uses "@name" parameters and "INSERT ... ON CONFLICT" through the dialect.
-public sealed class SqlArchiveStore : IArchiveStore
+public sealed partial class SqlArchiveStore : IArchiveStore
 {
     private readonly SqlDialect dialect;
     private readonly string connectionString;
@@ -19,7 +19,6 @@ public sealed class SqlArchiveStore : IArchiveStore
     private readonly object cacheLock = new();
     private readonly SemaphoreSlim loadGate = new(1, 1);
     private readonly Dictionary<string, CachedSearch> searchCache = new(StringComparer.Ordinal);
-    private HashSet<long>? savedIds;
     private long savedVersion;
     private long useTick;
 
@@ -32,6 +31,8 @@ public sealed class SqlArchiveStore : IArchiveStore
         public SearchSnapshot? Composed;
         public long ComposedVersion = -1;
         public long LastUsed;
+        public readonly HashSet<long> Saved = new();   // saved captures of this list only
+        public HashSet<long>? Members;
     }
 
     public SqlArchiveStore(SqlDialect dialect, string connectionString, HtmlFileStore htmlFiles)
@@ -55,6 +56,9 @@ public sealed class SqlArchiveStore : IArchiveStore
             using var cmd = Cmd(conn, null, sql);
             cmd.ExecuteNonQuery();
         }
+        FilteredQueries.EnsureClassificationSchema(conn, dialect);
+        FilteredQueries.ClassifyPending(conn, ct);   // one-time: classification for captures saved before it existed
+        UrlQueries.Backfill(conn);   // one-time: summary rows for searches saved before the summary table existed
         dialect.AfterSchema(conn);
         return 0;
     }, ct);
@@ -67,11 +71,58 @@ public sealed class SqlArchiveStore : IArchiveStore
     public async Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit,
         CancellationToken ct = default)
     {
-        var snapshot = await GetCachedSnapshotAsync(prefix, filter, ct).ConfigureAwait(false);
-        if (snapshot is null) return null;
-        var slice = snapshot.Captures.Skip(Math.Max(0, offset)).Take(Math.Max(0, limit)).ToList();
-        return new PagedSearchResult(snapshot.SearchId, snapshot.CachedAt, slice, snapshot.Captures.Count);
-    }
+		var cached = TryGetCached(CacheKey(prefix, filter));
+		if (cached is not null)
+		{
+			var slice = cached.Captures.Skip(Math.Max(0, offset)).Take(Math.Max(0, limit)).ToList();
+			return new PagedSearchResult(cached.SearchId, cached.CachedAt, slice, cached.Captures.Count);
+		}
+		// Not cached: page in SQL (ORDER BY + LIMIT, EXISTS for "saved") instead of loading the whole list.
+		return await Task.Run(() => ReadPageFromSql(prefix, filter, Math.Max(0, offset), Math.Max(0, limit)), ct).ConfigureAwait(false);
+	}
+
+	private PagedSearchResult? ReadPageFromSql(string prefix, string filter, int offset, int limit)
+	{
+		using var conn = Open();
+		long id, cachedAtMs;
+		using (var find = Cmd(conn, null, "SELECT Id, CachedAtUtc FROM Searches WHERE UrlPrefix = @p AND Filter = @f"))
+		{
+			Param(find, "@p", prefix);
+			Param(find, "@f", filter);
+			using var r = find.ExecuteReader();
+			if (!r.Read()) return null;
+			id = r.GetInt64(0);
+			cachedAtMs = r.GetInt64(1);
+		}
+		long total;
+		using (var count = Cmd(conn, null, "SELECT COUNT(*) FROM SearchCaptures WHERE SearchId = @id"))
+		{
+			Param(count, "@id", id);
+			total = Convert.ToInt64(count.ExecuteScalar());
+		}
+		var rows = new List<StoredCapture>(limit);
+		if (limit > 0)
+		{
+			using var cmd = Cmd(conn, null, """
+				SELECT c.Id, c.CaptureTs, c.Original, c.MimeType, c.StatusCode,
+					   CASE WHEN EXISTS (SELECT 1 FROM Pages p WHERE p.CaptureId = c.Id) THEN 1 ELSE 0 END
+				FROM SearchCaptures sc
+				JOIN Captures c ON c.Id = sc.CaptureId
+				WHERE sc.SearchId = @id
+				ORDER BY c.CaptureTs DESC, c.Id DESC
+				LIMIT @limit OFFSET @offset
+				""");
+			Param(cmd, "@id", id);
+			Param(cmd, "@limit", limit);
+			Param(cmd, "@offset", offset);
+			using var reader = cmd.ExecuteReader();
+			while (reader.Read())
+				rows.Add(new StoredCapture(reader.GetInt64(0),
+					new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)),
+					Convert.ToInt64(reader.GetValue(5)) != 0));
+		}
+		return new PagedSearchResult(id, DateTimeOffset.FromUnixTimeMilliseconds(cachedAtMs), rows, (int)total);
+	}
 
     private async Task<SearchSnapshot?> GetCachedSnapshotAsync(string prefix, string filter, CancellationToken ct)
     {
@@ -102,9 +153,9 @@ public sealed class SqlArchiveStore : IArchiveStore
 
                 var loaded = LoadCachedSearch(conn, id, DateTimeOffset.FromUnixTimeMilliseconds(cachedAtMs));
                 UrlClassifier.Warm(loaded.Captures.Select(c => c.Original).ToArray());
-                EnsureSavedIds(conn);
-                lock (cacheLock)
+                lock (cacheLock)   // read under the lock so a concurrent MarkSaved cannot be missed
                 {
+                    LoadSaved(conn, loaded);
                     loaded.LastUsed = ++useTick;
                     searchCache[key] = loaded;
                     while (searchCache.Count > MaxCachedSearches)
@@ -126,7 +177,7 @@ public sealed class SqlArchiveStore : IArchiveStore
     {
         lock (cacheLock)
         {
-            if (savedIds is null || !searchCache.TryGetValue(key, out var cached)) return null;
+            if (!searchCache.TryGetValue(key, out var cached)) return null;
             cached.LastUsed = ++useTick;
             return Compose(cached);
         }
@@ -137,7 +188,7 @@ public sealed class SqlArchiveStore : IArchiveStore
         lock (cacheLock)
         {
             if (cached.Composed is not null && cached.ComposedVersion == savedVersion) return cached.Composed;
-            var saved = savedIds!;
+            var saved = cached.Saved;
             var list = new List<StoredCapture>(cached.Ids.Length);
             for (var i = 0; i < cached.Ids.Length; i++)
                 list.Add(new StoredCapture(cached.Ids[i], cached.Captures[i], saved.Contains(cached.Ids[i])));
@@ -147,30 +198,26 @@ public sealed class SqlArchiveStore : IArchiveStore
         }
     }
 
-    private void EnsureSavedIds(DbConnection conn)
-    {
-        lock (cacheLock)
-        {
-            if (savedIds is not null) return;
-            var set = new HashSet<long>();
-            using var cmd = Cmd(conn, null, "SELECT CaptureId FROM Pages");
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read()) set.Add(reader.GetInt64(0));
-            savedIds = set;
-            savedVersion++;
-        }
-    }
+	private void LoadSaved(DbConnection conn, CachedSearch cached)
+	{
+		using var cmd = Cmd(conn, null, "SELECT sc.CaptureId FROM SearchCaptures sc JOIN Pages p ON p.CaptureId = sc.CaptureId WHERE sc.SearchId = @id");
+		Param(cmd, "@id", cached.SearchId);
+		using var reader = cmd.ExecuteReader();
+		while (reader.Read()) cached.Saved.Add(reader.GetInt64(0));
+	}
 
-    private void MarkSaved(List<long> ids)
-    {
-        lock (cacheLock)
-        {
-            if (savedIds is null) return;
-            foreach (var id in ids) savedIds.Add(id);
-            savedVersion++;
-        }
-    }
-
+	private void MarkSaved(List<long> ids)
+	{
+		lock (cacheLock)
+		{
+			foreach (var cached in searchCache.Values)
+			{
+				cached.Members ??= new HashSet<long>(cached.Ids);
+				foreach (var id in ids) if (cached.Members.Contains(id)) cached.Saved.Add(id);
+			}
+			savedVersion++;
+		}
+	}
     private CachedSearch LoadCachedSearch(DbConnection conn, long searchId, DateTimeOffset cachedAt)
     {
         using var cmd = Cmd(conn, null, """
@@ -246,7 +293,9 @@ public sealed class SqlArchiveStore : IArchiveStore
                 insertMember.ExecuteNonQuery();
             }
 
+            UrlQueries.RefreshSummary(conn, tx, id);
             tx.Commit();
+            FilteredQueries.ClassifyPending(conn, ct);
             return id;
         }, ct).ConfigureAwait(false);
 

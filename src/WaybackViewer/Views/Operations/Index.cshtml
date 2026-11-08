@@ -1,0 +1,227 @@
+@model OperationsPageModel
+@{
+	ViewData["Title"] = "Operations";
+	string Qs(int page, string? state, string? type)
+	{
+		var parts = new List<string> { "page=" + page, "pageSize=" + Model.PageSize };
+		if (state is not null) parts.Add("state=" + Uri.EscapeDataString(state));
+		if (type is not null) parts.Add("type=" + Uri.EscapeDataString(type));
+		return "/operations?" + string.Join("&", parts);
+	}
+	string Eta(double? seconds) => seconds is null ? "–" : TimeSpan.FromSeconds(seconds.Value).ToString(seconds.Value >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
+	string Bar(BackgroundOperation? op) => op is null ? "" : op.State switch
+	{
+		OperationState.Failed => "wf-err",
+		OperationState.Completed or OperationState.CompletedWithFailures => "wf-done",
+		_ => "wf-on"
+	};
+	string Count(BackgroundOperation? op) => op is null ? "–" : $"{op.Completed}/{op.Total}";
+	var states = new[] { (null as string, "All states"), ("active", "Active"), ("paused", "Paused"), ("completed", "Completed"), ("failures", "With failures") };
+	var types = new[] { (null as string, "All types"), ("captureload", "Capture list"), ("preload", "Page preload") };
+}
+
+<section class="ops-page">
+  <h1>Operations</h1>
+  <p class="ops-help">Background work for every searched URL. Capture-list loads and page preloads run independently; active URLs share the download workers fairly.</p>
+
+  <nav class="ops-filters" aria-label="Filter operations">
+	@foreach (var (value, label) in states)
+	{
+	  <a href="@Qs(1, value, Model.TypeFilter)" class="@(value == Model.StateFilter ? "on" : "")">@label</a>
+	}
+	<span class="sep">|</span>
+	@foreach (var (value, label) in types)
+	{
+	  <a href="@Qs(1, Model.StateFilter, value)" class="@(value == Model.TypeFilter ? "on" : "")">@label</a>
+	}
+  </nav>
+
+  <div class="ops-bulk">
+	<button type="button" data-bulk="pause" data-all="true">Pause all</button>
+	<button type="button" data-bulk="resume" data-all="true">Resume all</button>
+	<button type="button" data-bulk="retry-failed" data-all="true">Retry all failed</button>
+	<span class="sep">|</span>
+	<span id="opsSelected">0 selected</span>
+	<button type="button" data-bulk="pause">Pause selected</button>
+	<button type="button" data-bulk="resume">Resume selected</button>
+	<button type="button" data-bulk="retry-failed">Retry failed (selected)</button>
+	<button type="button" data-bulk="refresh">Refresh selected</button>
+	<span id="opsMessage" aria-live="polite"></span>
+  </div>
+
+  @if (Model.Rows.Count == 0)
+  {
+	<p class="ops-empty">No operations match.</p>
+  }
+  else
+  {
+	<table class="ops-table" id="opsTable">
+	  <thead>
+		<tr>
+		  <th><input type="checkbox" id="opsAll" aria-label="Select all rows on this page" /></th>
+		  <th>URL</th><th>State</th><th>Capture list</th><th>Page preload</th>
+		  <th>Saved</th><th>Skipped</th><th>Failed</th><th>Pending</th><th>Speed</th><th>ETA</th><th>Last error</th><th>Actions</th>
+		</tr>
+	  </thead>
+	  <tbody>
+		@foreach (var row in Model.Rows)
+		{
+		  <tr data-prefix="@row.Prefix" data-filter="@row.Filter">
+			<td><input type="checkbox" class="ops-pick" aria-label="Select @row.Prefix" /></td>
+			<td class="ops-url"><a href="/?url=@Uri.EscapeDataString(row.Prefix)&amp;filter=@Uri.EscapeDataString(row.Filter)">@row.Prefix</a> <small>@row.Filter</small></td>
+			<td><span class="ops-badge ops-@row.State.ToLowerInvariant()" data-f="state">@row.State</span></td>
+			<td><div class="wf-track"><i class="@Bar(row.CaptureLoad)" data-f="captureBar" style="width:@(row.CapturePercent.ToString(System.Globalization.CultureInfo.InvariantCulture))%"></i></div><small data-f="captureText">@Count(row.CaptureLoad)</small></td>
+			<td><div class="wf-track"><i class="@Bar(row.Preload)" data-f="preloadBar" style="width:@(row.PreloadPercent.ToString(System.Globalization.CultureInfo.InvariantCulture))%"></i></div><small data-f="preloadText">@Count(row.Preload)</small></td>
+			<td data-f="saved">@row.Saved</td>
+			<td data-f="skipped">@(row.Skipped?.ToString() ?? "–")</td>
+			<td data-f="failed">@row.Failed</td>
+			<td data-f="pending">@row.Pending</td>
+			<td data-f="speed">@(row.PerSecond > 0 ? row.PerSecond + "/s" : "–")</td>
+			<td data-f="eta">@Eta(row.EtaSeconds)</td>
+			<td class="operation-error" data-f="error">@row.LastError</td>
+			<td class="ops-actions">
+			  <button type="button" data-row="@(row.Paused ? "resume" : "pause")">@(row.Paused ? "Resume" : "Pause")</button>
+			  <button type="button" data-row="retry-failed">Retry failed</button>
+			  <button type="button" data-row="refresh">Refresh list</button>
+			  <button type="button" data-delete="pages" title="Delete the preloaded pages; the capture list stays">Delete pages</button>
+              <button type="button" data-delete="all" title="Delete everything stored for this URL">Delete all</button>
+			</td>
+		  </tr>
+		}
+	  </tbody>
+	</table>
+  }
+
+  <div class="pager">
+	@if (Model.Page > 1) { <a href="@Qs(Model.Page - 1, Model.StateFilter, Model.TypeFilter)">« Prev</a> }
+	<span>Page @Model.Page of @Model.PageCount · @Model.Total URLs</span>
+	@if (Model.Page < Model.PageCount) { <a href="@Qs(Model.Page + 1, Model.StateFilter, Model.TypeFilter)">Next »</a> }
+  </div>
+</section>
+
+<style>
+  .ops-page { max-width: 1400px; }
+  .ops-help { color: var(--muted); }
+  .ops-filters, .ops-bulk { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+  .ops-filters a.on { font-weight: bold; text-decoration: underline; }
+  .ops-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .ops-table th, .ops-table td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: middle; }
+  .ops-table .wf-track { width: 120px; }
+  .ops-url { max-width: 320px; overflow-wrap: anywhere; }
+  .ops-badge { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
+  .ops-running, .ops-queued { color: var(--accent); }
+  .ops-completed { color: var(--ok); }
+  .ops-failed, .ops-completedwithfailures { color: #ff9d9d; }
+  .ops-paused { color: var(--muted); }
+</style>
+
+<script>
+(() => {
+  const token = () => document.querySelector('meta[name="request-verification-token"]')?.content || '';
+  const table = document.getElementById('opsTable');
+  const message = document.getElementById('opsMessage');
+  const selectedInfo = document.getElementById('opsSelected');
+  const rows = () => table ? [...table.tBodies[0].rows] : [];
+  const key = tr => ({ prefix: tr.dataset.prefix, filter: tr.dataset.filter });
+  const selected = () => rows().filter(tr => tr.querySelector('.ops-pick').checked).map(key);
+
+  async function post(action, body) {
+	const response = await fetch('/operations/' + action, {
+	  method: 'POST',
+	  headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': token() },
+	  body: JSON.stringify(body)
+	});
+	if (!response.ok) throw new Error('HTTP ' + response.status);
+	return response.json();
+  }
+
+  async function run(action, body) {
+	message.textContent = 'Working...';
+	try {
+	  const result = await post(action, body);
+	  message.textContent = 'Applied to ' + result.applied + ' URL(s).';
+	  refresh();
+	} catch (e) { message.textContent = 'Action failed (' + e.message + ').'; }
+  }
+
+  document.querySelectorAll('[data-bulk]').forEach(btn => btn.addEventListener('click', () => {
+	if (btn.dataset.all === 'true') return run(btn.dataset.bulk, { all: true });
+	const keys = selected();
+	if (keys.length === 0) { message.textContent = 'Select at least one row.'; return; }
+	run(btn.dataset.bulk, { keys });
+  }));
+  if (table) {
+	table.addEventListener('click', e => {
+	  const btn = e.target.closest('[data-row]');
+	  if (btn) run(btn.dataset.row, { keys: [key(btn.closest('tr'))] });
+	});
+	table.addEventListener('change', () => { selectedInfo.textContent = selected().length + ' selected'; });
+	document.getElementById('opsAll')?.addEventListener('change', e => {
+	  rows().forEach(tr => tr.querySelector('.ops-pick').checked = e.target.checked);
+	  selectedInfo.textContent = selected().length + ' selected';
+	});
+  }
+
+  // Delete: ask the server what would be removed, confirm, then the delete runs as a background operation.
+  async function confirmDelete(tr, level) {
+    const k = key(tr);
+    const p = await post('delete-preview', { key: k });
+    const mb = (p.bytes / 1048576).toFixed(1);
+    const what = level === 'all'
+      ? 'Delete everything for ' + k.prefix + '? ' + p.captures + ' captures, ' + p.pages + ' saved pages (' + mb + ' MB) will be removed.'
+      : 'Delete the ' + p.pages + ' preloaded pages (' + mb + ' MB) of ' + k.prefix + '? The capture list is kept.';
+    const shared = p.sharedCaptures > 0 ? ' ' + p.sharedCaptures + ' captures also used by other URLs are kept.' : '';
+    if (!window.confirm(what + shared)) return;
+    message.textContent = 'Working...';
+    await post('delete', { key: k, level });
+    message.textContent = 'Delete started.';
+    refresh();
+  }
+  if (table) table.addEventListener('click', e => {
+    const btn = e.target.closest('[data-delete]');
+    if (btn) confirmDelete(btn.closest('tr'), btn.dataset.delete).catch(err => { message.textContent = 'Delete failed (' + err.message + ').'; });
+  });
+
+  const set = (tr, f, v) => { const el = tr.querySelector('[data-f="' + f + '"]'); if (el) el.textContent = v; };
+  const bar = (tr, f, op) => {
+	const el = tr.querySelector('[data-f="' + f + '"]'); if (!el) return;
+	const done = op && (op.state === 6 || op.state === 8);
+	const pct = !op ? 0 : op.total > 0 ? Math.min(100, op.completed * 100 / op.total) : (done || op.state === 7 ? 100 : 0);
+	el.style.width = pct + '%';
+	el.className = !op ? '' : op.state === 7 ? 'wf-err' : done ? 'wf-done' : 'wf-on';
+  };
+  const eta = s => s == null ? '–' : (s >= 3600 ? Math.floor(s / 3600) + ':' : '') + String(Math.floor(s % 3600 / 60)).padStart(s >= 3600 ? 2 : 1, '0') + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+
+  // Polls the status of the visible rows only.
+  async function refresh() {
+	const visible = rows();
+	if (visible.length === 0) return false;
+	const status = await post('status', { keys: visible.map(key) });
+	let active = false;
+	status.forEach((r, i) => {
+	  const tr = visible[i]; if (!tr) return;
+	  const badge = tr.querySelector('[data-f="state"]');
+	  badge.textContent = r.state; badge.className = 'ops-badge ops-' + r.state.toLowerCase();
+	  bar(tr, 'captureBar', r.captureLoad); bar(tr, 'preloadBar', r.preload);
+	  set(tr, 'captureText', r.captureLoad ? r.captureLoad.completed + '/' + r.captureLoad.total : '–');
+	  set(tr, 'preloadText', r.preload ? r.preload.completed + '/' + r.preload.total : '–');
+	  set(tr, 'saved', r.saved); set(tr, 'skipped', r.skipped ?? '–'); set(tr, 'failed', r.failed);
+	  set(tr, 'pending', r.pending); set(tr, 'speed', r.perSecond > 0 ? r.perSecond + '/s' : '–');
+	  set(tr, 'eta', eta(r.etaSeconds)); set(tr, 'error', r.lastError || '');
+	  const toggle = tr.querySelector('[data-row="pause"],[data-row="resume"]');
+	  toggle.dataset.row = r.paused ? 'resume' : 'pause'; toggle.textContent = r.paused ? 'Resume' : 'Pause';
+	  active ||= r.active;
+	});
+	return active;
+  }
+
+  async function poll() {
+	let active = true;
+	try { active = await refresh(); } catch { /* keep polling; the next tick retries */ }
+	setTimeout(poll, window.wbLive && window.wbLive.connected ? 15000 : active ? 1500 : 5000);   // SSE connected: polling is only a safety net
+  }
+  let pending = false;
+  window.addEventListener('wb-operation', () => { if (pending) return; pending = true; setTimeout(() => { pending = false; refresh().catch(() => { }); }, 250); });
+  poll();
+})();
+</script>

@@ -7,7 +7,7 @@ namespace WaybackViewer.Storage;
 /// SQLite implementation: one local file, nothing to install. WAL mode lets reads run while a write is in
 /// progress; all writes are serialised through one lock and done inside a single transaction per call, which is
 /// what makes saving thousands of rows take milliseconds instead of seconds.
-public sealed class SqliteArchiveStore : IArchiveStore
+public sealed partial class SqliteArchiveStore : IArchiveStore
 {
     internal static readonly string[] SchemaStatements =
     [
@@ -47,7 +47,12 @@ public sealed class SqliteArchiveStore : IArchiveStore
         "CREATE TABLE IF NOT EXISTS PageMetadata (CaptureId INTEGER PRIMARY KEY, Views INTEGER, Likes INTEGER, Shares INTEGER, Comments INTEGER, Score INTEGER, EngagementScore INTEGER, Source TEXT, Author TEXT, PublishedAtUtc INTEGER, Tags TEXT, Confidence REAL)",
         "CREATE TABLE IF NOT EXISTS CaptureSearch (CaptureId INTEGER PRIMARY KEY, SearchText TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS IX_CaptureSearch_SearchText ON CaptureSearch(SearchText)",
+        // Per-list archive popularity fallback (see ArchiveSignals), rebuilt when the list is refreshed.
+        "CREATE TABLE IF NOT EXISTS CaptureSignals (SearchId INTEGER NOT NULL, CaptureId INTEGER NOT NULL, Host TEXT NOT NULL, Raw INTEGER NOT NULL, PRIMARY KEY (SearchId, CaptureId)) WITHOUT ROWID",
+        "CREATE TABLE IF NOT EXISTS SearchSignals (SearchId INTEGER PRIMARY KEY, CachedAtUtc INTEGER NOT NULL, Total INTEGER NOT NULL)",
         "CREATE TABLE IF NOT EXISTS PageHtml (CaptureId INTEGER PRIMARY KEY, HtmlGz BLOB NOT NULL)",
+        // Terminal preload result of captures that are not saved (skipped / failed); saved = a Pages row.
+        "CREATE TABLE IF NOT EXISTS CaptureOutcomes (CaptureId INTEGER PRIMARY KEY, Outcome INTEGER NOT NULL, Reason TEXT NOT NULL, UpdatedAtUtc INTEGER NOT NULL)",
         """
         CREATE TABLE IF NOT EXISTS Operations (
             Id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +69,11 @@ public sealed class SqliteArchiveStore : IArchiveStore
             UNIQUE (UrlPrefix, Filter, Kind))
         """,
         "CREATE INDEX IF NOT EXISTS IX_SearchCaptures_CaptureId ON SearchCaptures (CaptureId)",
-        "CREATE INDEX IF NOT EXISTS IX_Operations_State ON Operations (State, UpdatedAt)"
+        "CREATE INDEX IF NOT EXISTS IX_Operations_State ON Operations (State, UpdatedAt)",
+        "CREATE INDEX IF NOT EXISTS IX_Operations_UpdatedAt ON Operations (UpdatedAt)",
+        "CREATE TABLE IF NOT EXISTS SearchSummary (SearchId INTEGER PRIMARY KEY, CaptureCount INTEGER NOT NULL, FirstTs TEXT, LastTs TEXT)",
+        "CREATE INDEX IF NOT EXISTS IX_SearchSummary_Count ON SearchSummary (CaptureCount)",
+        "CREATE INDEX IF NOT EXISTS IX_Searches_Cached ON Searches (CachedAtUtc)"
     ];
 
     private readonly string connectionString;
@@ -79,7 +88,7 @@ public sealed class SqliteArchiveStore : IArchiveStore
     private readonly object cacheLock = new();
     private readonly SemaphoreSlim loadGate = new(1, 1);
     private readonly Dictionary<string, CachedSearch> searchCache = new(StringComparer.Ordinal);
-    private HashSet<long>? savedIds;
+
     private long savedVersion;
     private long useTick;
 
@@ -92,6 +101,8 @@ public sealed class SqliteArchiveStore : IArchiveStore
         public SearchSnapshot? Composed;
         public long ComposedVersion = -1;
         public long LastUsed;
+        public readonly HashSet<long> Saved = new();   // saved captures of this list only
+        public HashSet<long>? Members;
     }
 
     public Task<IReadOnlyDictionary<string, PageMetadata>> GetPopularityMetadataAsync(string prefix, string filter, CancellationToken ct = default) =>
@@ -159,6 +170,9 @@ public sealed class SqliteArchiveStore : IArchiveStore
             using var cmd = Cmd(conn, null, sql);
             cmd.ExecuteNonQuery();
         }
+        EnsureClassificationSchema(conn);
+        ClassifyPending(conn, ct);   // one-time: Year/Category/Section/Kind/GroupKey for captures saved before they existed
+        UrlQueries.Backfill(conn);   // one-time: summary rows for searches saved before the summary table existed
         using (var optimize = Cmd(conn, null, "PRAGMA optimize")) optimize.ExecuteNonQuery();
         return 0;
     }, ct);
@@ -166,11 +180,58 @@ public sealed class SqliteArchiveStore : IArchiveStore
     public async Task<PagedSearchResult?> GetSearchPageAsync(string prefix, string filter, int offset, int limit,
         CancellationToken ct = default)
     {
-        var snapshot = await GetCachedSnapshotAsync(prefix, filter, ct).ConfigureAwait(false);
-        if (snapshot is null) return null;
-        var slice = snapshot.Captures.Skip(Math.Max(0, offset)).Take(Math.Max(0, limit)).ToList();
-        return new PagedSearchResult(snapshot.SearchId, snapshot.CachedAt, slice, snapshot.Captures.Count);
-    }
+		var cached = TryGetCached(CacheKey(prefix, filter));
+		if (cached is not null)
+		{
+			var slice = cached.Captures.Skip(Math.Max(0, offset)).Take(Math.Max(0, limit)).ToList();
+			return new PagedSearchResult(cached.SearchId, cached.CachedAt, slice, cached.Captures.Count);
+		}
+		// Not cached: page in SQL (indexed ORDER BY + LIMIT, EXISTS for "saved") instead of loading the whole list.
+		return await Task.Run(() => ReadPageFromSql(prefix, filter, Math.Max(0, offset), Math.Max(0, limit)), ct).ConfigureAwait(false);
+	}
+
+	private PagedSearchResult? ReadPageFromSql(string prefix, string filter, int offset, int limit)
+	{
+		using var conn = Open();
+		long id, cachedAtMs;
+		using (var find = Cmd(conn, null, "SELECT Id, CachedAtUtc FROM Searches WHERE UrlPrefix = $p AND Filter = $f"))
+		{
+			find.Parameters.AddWithValue("$p", prefix);
+			find.Parameters.AddWithValue("$f", filter);
+			using var r = find.ExecuteReader();
+			if (!r.Read()) return null;
+			id = r.GetInt64(0);
+			cachedAtMs = r.GetInt64(1);
+		}
+		long total;
+		using (var count = Cmd(conn, null, "SELECT COUNT(*) FROM SearchCaptures WHERE SearchId = $id"))
+		{
+			count.Parameters.AddWithValue("$id", id);
+			total = (long)count.ExecuteScalar()!;
+		}
+		var rows = new List<StoredCapture>(limit);
+		if (limit > 0)
+		{
+			using var cmd = Cmd(conn, null, """
+				SELECT c.Id, c.CaptureTs, c.Original, c.MimeType, c.StatusCode,
+					   EXISTS (SELECT 1 FROM Pages p WHERE p.CaptureId = c.Id)
+				FROM SearchCaptures sc
+				JOIN Captures c ON c.Id = sc.CaptureId
+				WHERE sc.SearchId = $id
+				ORDER BY c.CaptureTs DESC, c.Id DESC
+				LIMIT $limit OFFSET $offset
+				""");
+			cmd.Parameters.AddWithValue("$id", id);
+			cmd.Parameters.AddWithValue("$limit", limit);
+			cmd.Parameters.AddWithValue("$offset", offset);
+			using var reader = cmd.ExecuteReader();
+			while (reader.Read())
+				rows.Add(new StoredCapture(reader.GetInt64(0),
+					new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)),
+					reader.GetInt64(5) != 0));
+		}
+		return new PagedSearchResult(id, DateTimeOffset.FromUnixTimeMilliseconds(cachedAtMs), rows, (int)total);
+	}
 
     public Task<BackgroundOperation?> FindActiveOperationAsync(string prefix, string filter, OperationKind kind,
         CancellationToken ct = default) => Task.Run(() =>
@@ -242,7 +303,7 @@ public sealed class SqliteArchiveStore : IArchiveStore
         {
             using var conn = Open();
             var sql = activeOnly
-                ? "SELECT * FROM Operations WHERE State IN (0, 1, 2, 3, 5) ORDER BY UpdatedAt DESC"
+                ? "SELECT * FROM Operations WHERE State IN (" + OperationStates.ActiveSqlList + ") ORDER BY UpdatedAt DESC"
                 : "SELECT * FROM Operations ORDER BY UpdatedAt DESC";
             using var cmd = Cmd(conn, null, sql);
             using var reader = cmd.ExecuteReader();
@@ -251,6 +312,33 @@ public sealed class SqliteArchiveStore : IArchiveStore
             return (IReadOnlyList<BackgroundOperation>)result;
         }, ct);
 
+    public Task<IReadOnlyList<BackgroundOperation>> GetOperationsForSearchAsync(string prefix, string filter,
+        CancellationToken ct = default) => Task.Run(() =>
+        {
+            using var conn = Open();
+            return OperationQueries.ForSearch(conn, prefix, filter, r => ReadOperation((Microsoft.Data.Sqlite.SqliteDataReader)r));
+        }, ct);
+
+    public Task<int> CountOtherActiveSearchesAsync(string prefix, string filter, CancellationToken ct = default) =>
+        Task.Run(() =>
+        {
+            using var conn = Open();
+            return OperationQueries.CountOtherActive(conn, prefix, filter);
+        }, ct);
+
+    public Task<OperationSearchPage> ListOperationSearchesAsync(OperationListQuery query, CancellationToken ct = default) =>
+        Task.Run(() =>
+        {
+            using var conn = Open();
+            return OperationQueries.ListSearches(conn, query);
+        }, ct);
+
+    public Task<IReadOnlyList<BackgroundOperation>> GetOperationsForSearchesAsync(IReadOnlyCollection<SearchKey> searches,
+        CancellationToken ct = default) => Task.Run(() =>
+        {
+            using var conn = Open();
+            return OperationQueries.ForSearches(conn, searches, r => ReadOperation((Microsoft.Data.Sqlite.SqliteDataReader)r));
+        }, ct);
     public Task UpdateOperationAsync(BackgroundOperation operation, CancellationToken ct = default) => WriteAsync(() =>
     {
         using var conn = Open();
@@ -301,9 +389,9 @@ public sealed class SqliteArchiveStore : IArchiveStore
 
                 var loaded = LoadCachedSearch(conn, id, DateTimeOffset.FromUnixTimeMilliseconds(cachedAtMs));
                 UrlClassifier.Warm(loaded.Captures.Select(c => c.Original).ToArray()); // parallel, so the first filter click is fast too
-                EnsureSavedIds(conn);
-                lock (cacheLock)
+                lock (cacheLock)   // read under the lock so a concurrent MarkSaved cannot be missed
                 {
+                    LoadSaved(conn, loaded);
                     loaded.LastUsed = ++useTick;
                     searchCache[key] = loaded;
                     while (searchCache.Count > MaxCachedSearches)
@@ -325,7 +413,7 @@ public sealed class SqliteArchiveStore : IArchiveStore
     {
         lock (cacheLock)
         {
-            if (savedIds is null || !searchCache.TryGetValue(key, out var cached)) return null;
+            if (!searchCache.TryGetValue(key, out var cached)) return null;
             cached.LastUsed = ++useTick;
             return Compose(cached);
         }
@@ -337,7 +425,7 @@ public sealed class SqliteArchiveStore : IArchiveStore
         lock (cacheLock)
         {
             if (cached.Composed is not null && cached.ComposedVersion == savedVersion) return cached.Composed;
-            var saved = savedIds!;
+            var saved = cached.Saved;
             var list = new List<StoredCapture>(cached.Ids.Length);
             for (var i = 0; i < cached.Ids.Length; i++)
                 list.Add(new StoredCapture(cached.Ids[i], cached.Captures[i], saved.Contains(cached.Ids[i])));
@@ -347,30 +435,26 @@ public sealed class SqliteArchiveStore : IArchiveStore
         }
     }
 
-    private void EnsureSavedIds(SqliteConnection conn)
+    private static void LoadSaved(SqliteConnection conn, CachedSearch cached)
     {
-        lock (cacheLock)   // held while reading so a concurrent SavePages cannot be missed (see MarkSaved)
-        {
-            if (savedIds is not null) return;
-            var set = new HashSet<long>();
-            using var cmd = Cmd(conn, null, "SELECT CaptureId FROM Pages");
-            using var reader = cmd.ExecuteReader();
-            while (reader.Read()) set.Add(reader.GetInt64(0));
-            savedIds = set;
-            savedVersion++;
-        }
+        using var cmd = Cmd(conn, null, "SELECT sc.CaptureId FROM SearchCaptures sc JOIN Pages p ON p.CaptureId = sc.CaptureId WHERE sc.SearchId = $id");
+        cmd.Parameters.AddWithValue("$id", cached.SearchId);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) cached.Saved.Add(reader.GetInt64(0));
     }
 
     private void MarkSaved(List<long> ids)
     {
         lock (cacheLock)
         {
-            if (savedIds is null) return;   // not loaded yet: the first load reads everything that is committed
-            foreach (var id in ids) savedIds.Add(id);
+            foreach (var cached in searchCache.Values)
+            {
+                cached.Members ??= new HashSet<long>(cached.Ids);
+                foreach (var id in ids) if (cached.Members.Contains(id)) cached.Saved.Add(id);
+            }
             savedVersion++;
         }
     }
-
     public async Task<SearchSnapshot> SaveSearchAsync(string prefix, string filter, IReadOnlyList<Capture> captures,
         DateTimeOffset cachedAt, CancellationToken ct = default)
     {
@@ -429,7 +513,9 @@ public sealed class SqliteArchiveStore : IArchiveStore
                 insertMember.ExecuteNonQuery();
             }
 
+            UrlQueries.RefreshSummary(conn, tx, id);
             tx.Commit();
+            ClassifyPending(conn, ct);
             return id;
         }, ct);
 
@@ -617,6 +703,82 @@ public sealed class SqliteArchiveStore : IArchiveStore
 
     // ---- helpers -----------------------------------------------------------------------------------------
 
+    public Task SaveOutcomesAsync(IReadOnlyList<CaptureOutcome> outcomes, CancellationToken ct = default) =>
+        outcomes.Count == 0 ? Task.CompletedTask : WriteAsync(() =>
+        {
+            using var conn = Open();
+            using var tx = conn.BeginTransaction();
+            using var insertCapture = Cmd(conn, tx,
+                "INSERT OR IGNORE INTO Captures (CaptureTs, Original, MimeType, StatusCode) VALUES ($ts, $o, $m, $s)");
+            var cTs = insertCapture.Parameters.Add("$ts", SqliteType.Text);
+            var cO = insertCapture.Parameters.Add("$o", SqliteType.Text);
+            var cM = insertCapture.Parameters.Add("$m", SqliteType.Text);
+            var cS = insertCapture.Parameters.Add("$s", SqliteType.Text);
+            using var upsert = Cmd(conn, tx, """
+                INSERT OR REPLACE INTO CaptureOutcomes (CaptureId, Outcome, Reason, UpdatedAtUtc)
+                SELECT Id, $outcome, $reason, $at FROM Captures WHERE CaptureTs = $ts AND Original = $o
+                """);
+            var uTs = upsert.Parameters.Add("$ts", SqliteType.Text);
+            var uO = upsert.Parameters.Add("$o", SqliteType.Text);
+            var uOutcome = upsert.Parameters.Add("$outcome", SqliteType.Integer);
+            var uReason = upsert.Parameters.Add("$reason", SqliteType.Text);
+            var uAt = upsert.Parameters.Add("$at", SqliteType.Integer);
+            foreach (var outcome in outcomes)
+            {
+                cTs.Value = uTs.Value = outcome.Capture.Timestamp;
+                cO.Value = uO.Value = outcome.Capture.Original;
+                cM.Value = outcome.Capture.MimeType;
+                cS.Value = outcome.Capture.StatusCode;
+                insertCapture.ExecuteNonQuery();
+                uOutcome.Value = (int)outcome.Outcome;
+                uReason.Value = outcome.Reason;
+                uAt.Value = outcome.At.ToUnixTimeMilliseconds();
+                upsert.ExecuteNonQuery();
+            }
+            tx.Commit();
+            return 0;
+        }, ct);
+
+    public Task<IReadOnlyDictionary<string, CaptureOutcome>> GetOutcomesAsync(string prefix, string filter, CancellationToken ct = default) =>
+        Task.Run<IReadOnlyDictionary<string, CaptureOutcome>>(() =>
+        {
+            using var conn = Open();
+            using var cmd = Cmd(conn, null, """
+                SELECT c.CaptureTs, c.Original, c.MimeType, c.StatusCode, o.Outcome, o.Reason, o.UpdatedAtUtc
+                FROM Searches s
+                JOIN SearchCaptures sc ON sc.SearchId = s.Id
+                JOIN CaptureOutcomes o ON o.CaptureId = sc.CaptureId
+                JOIN Captures c ON c.Id = o.CaptureId
+                WHERE s.UrlPrefix = $p AND s.Filter = $f
+                  AND NOT EXISTS (SELECT 1 FROM Pages p WHERE p.CaptureId = o.CaptureId)
+                """);
+            cmd.Parameters.AddWithValue("$p", prefix);
+            cmd.Parameters.AddWithValue("$f", filter);
+            using var reader = cmd.ExecuteReader();
+            var result = new Dictionary<string, CaptureOutcome>(StringComparer.Ordinal);
+            while (reader.Read())
+            {
+                var capture = new Capture(reader.GetString(0), reader.GetString(1), reader.GetString(2), reader.GetString(3));
+                result[capture.Key] = new CaptureOutcome(capture, (PreloadOutcome)reader.GetInt32(4), reader.GetString(5),
+                    DateTimeOffset.FromUnixTimeMilliseconds(reader.GetInt64(6)));
+            }
+            return result;
+        }, ct);
+
+    public Task<int> ResetFailedAsync(string prefix, string filter, CancellationToken ct = default) => WriteAsync(() =>
+    {
+        using var conn = Open();
+        using var cmd = Cmd(conn, null, """
+            DELETE FROM CaptureOutcomes WHERE Outcome = $failed AND CaptureId IN (
+                SELECT sc.CaptureId FROM Searches s JOIN SearchCaptures sc ON sc.SearchId = s.Id
+                WHERE s.UrlPrefix = $p AND s.Filter = $f)
+            """);
+        cmd.Parameters.AddWithValue("$failed", (int)PreloadOutcome.Failed);
+        cmd.Parameters.AddWithValue("$p", prefix);
+        cmd.Parameters.AddWithValue("$f", filter);
+        return cmd.ExecuteNonQuery();
+    }, ct);
+
     private async Task<T> WriteAsync<T>(Func<T> work, CancellationToken ct)
     {
         await writeLock.WaitAsync(ct).ConfigureAwait(false);
@@ -631,6 +793,8 @@ public sealed class SqliteArchiveStore : IArchiveStore
         using var pragma = conn.CreateCommand();
         pragma.CommandText = "PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-65536; PRAGMA busy_timeout=15000;";
         pragma.ExecuteNonQuery();
+        // Free-text URL filter: the C# matcher runs inside SQL so paging stays bounded.
+        conn.CreateFunction("url_match", (string? q, string? v) => SearchTextMatcher.Matches(q ?? string.Empty, v) ? 1 : 0);
         return conn;
     }
 

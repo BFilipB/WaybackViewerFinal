@@ -20,6 +20,14 @@ public sealed class PreloadOptions
     public int WriteBatchSize { get; set; } = 50;
     public int WriteMaxDelayMs { get; set; } = 300;
     public int MaxHtmlChars { get; set; } = 5_000_000;
+    /// Downloads failing with a temporary error (429, 5xx, timeouts, network) are retried up to this many times.
+    public int MaxAttempts { get; set; } = 8;
+    /// First retry delay; doubles per attempt up to RetryMaxDelayMs. Retry-After from the archive wins.
+    public int RetryBaseDelayMs { get; set; } = 2_000;
+    public int RetryMaxDelayMs { get; set; } = 60_000;
+    /// A database write of preload results is tried this many times before the job is marked Failed.
+    /// The pages stay without an outcome, so they are downloaded again on resume/restart. 0 = retry forever.
+    public int SaveMaxAttempts { get; set; } = 20;
 }
 
 public sealed class StorageOptions

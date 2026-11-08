@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using System.Net;
 using Microsoft.Extensions.Options;
 
@@ -9,11 +8,25 @@ public interface IArchiveClient
     Task<string> GetStringAsync(string url, CancellationToken ct = default);
 }
 
+/// The archive answered with a non-success status. RetryAfter carries the archive's Retry-After hint, if any.
+public sealed class ArchiveRequestException(HttpStatusCode statusCode, TimeSpan? retryAfter)
+    : HttpRequestException($"Archive request failed with HTTP {(int)statusCode}.", null, statusCode)
+{
+    public TimeSpan? RetryAfter { get; } = retryAfter;
+}
+
 /// Polite, fast client for web.archive.org: bounded concurrency, adaptive request spacing that backs off on
-/// HTTP 429 and recovers on success, retry with Retry-After / exponential backoff, and de-duplication of
-/// identical in-flight requests.
+/// HTTP 429 / network failures and recovers on success, retry with Retry-After / exponential backoff, and
+/// de-duplication of identical in-flight requests.
 public sealed class ArchiveClient : IArchiveClient
 {
+    private sealed class SharedRequest
+    {
+        public readonly CancellationTokenSource Cts = new();
+        public Task<string> Task = null!;
+        public int Waiters;
+    }
+
     private readonly HttpClient http;
     private readonly ArchiveOptions options;
     private readonly ITimeSource time;
@@ -23,7 +36,8 @@ public sealed class ArchiveClient : IArchiveClient
     private readonly TimeSpan maxInterval;
     private TimeSpan interval;
     private DateTime nextRequestUtc = DateTime.MinValue;
-    private readonly ConcurrentDictionary<string, Lazy<Task<string>>> inflight = new(StringComparer.Ordinal);
+    private readonly object inflightLock = new();
+    private readonly Dictionary<string, SharedRequest> inflight = new(StringComparer.Ordinal);
 
     public ArchiveClient(HttpClient http, IOptions<ArchiveOptions> options, ITimeSource time)
     {
@@ -38,36 +52,73 @@ public sealed class ArchiveClient : IArchiveClient
 
     public TimeSpan CurrentInterval { get { lock (paceLock) return interval; } }
 
-    public Task<string> GetStringAsync(string url, CancellationToken ct = default)
+    /// Identical in-flight requests share one download. A caller giving up does not cancel the shared download
+    /// while others still wait for it; once every caller has given up, the download itself is cancelled.
+    public async Task<string> GetStringAsync(string url, CancellationToken ct = default)
     {
-        var lazy = inflight.GetOrAdd(url,
-            u => new Lazy<Task<string>>(() => RunAsync(u), LazyThreadSafetyMode.ExecutionAndPublication));
-        return lazy.Value.WaitAsync(ct); // a caller giving up must not cancel the shared download
+        SharedRequest shared;
+        lock (inflightLock)
+        {
+            if (!inflight.TryGetValue(url, out shared!))
+            {
+                shared = new SharedRequest();
+                inflight[url] = shared;
+                shared.Task = RunAsync(url, shared);
+            }
+            shared.Waiters++;
+        }
+
+        try
+        {
+            return await shared.Task.WaitAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (inflightLock)
+            {
+                if (--shared.Waiters == 0 && !shared.Task.IsCompleted)
+                {
+                    shared.Cts.Cancel();
+                    if (inflight.TryGetValue(url, out var current) && ReferenceEquals(current, shared)) inflight.Remove(url);
+                }
+            }
+        }
     }
 
-    private async Task<string> RunAsync(string url)
+    private async Task<string> RunAsync(string url, SharedRequest shared)
     {
-        try { return await FetchAsync(url).ConfigureAwait(false); }
-        finally { inflight.TryRemove(url, out _); }
+        try
+        {
+            await Task.Yield();   // never run the download inside the caller's lock
+            return await FetchAsync(url, shared.Cts.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (inflightLock)
+            {
+                if (inflight.TryGetValue(url, out var current) && ReferenceEquals(current, shared)) inflight.Remove(url);
+            }
+        }
     }
 
-    private async Task<string> FetchAsync(string url)
+    private async Task<string> FetchAsync(string url, CancellationToken ct)
     {
-        await gate.WaitAsync().ConfigureAwait(false);
+        await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
             for (var attempt = 1; ; attempt++)
             {
-                await WaitForSlotAsync().ConfigureAwait(false);
+                await WaitForSlotAsync(ct).ConfigureAwait(false);
 
                 HttpResponseMessage response;
                 try
                 {
-                    response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+                    response = await http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct).ConfigureAwait(false);
                 }
-                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException && attempt < options.MaxAttempts)
+                catch (Exception ex) when (IsNetworkFailure(ex, ct) && attempt < options.MaxAttempts)
                 {
-                    await time.DelayAsync(Backoff(attempt, null)).ConfigureAwait(false);
+                    OnRateLimited();   // connection refused / reset / timeout: the archive is usually throttling us
+                    await time.DelayAsync(Backoff(attempt, null), ct).ConfigureAwait(false);
                     continue;
                 }
 
@@ -76,16 +127,16 @@ public sealed class ArchiveClient : IArchiveClient
                     if (response.IsSuccessStatusCode)
                     {
                         OnSuccess();
-                        return await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        return await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
                     }
 
                     var code = (int)response.StatusCode;
                     var retryable = code is 408 or 429 || code >= 500;
-                    if (!retryable || attempt >= options.MaxAttempts)
-                        throw new HttpRequestException($"Archive request failed with HTTP {code}.", null, response.StatusCode);
-
                     if (code == 429) OnRateLimited();
-                    await time.DelayAsync(Backoff(attempt, response)).ConfigureAwait(false);
+                    if (!retryable || attempt >= options.MaxAttempts)
+                        throw new ArchiveRequestException(response.StatusCode, RetryAfter(response));
+
+                    await time.DelayAsync(Backoff(attempt, response), ct).ConfigureAwait(false);
                 }
             }
         }
@@ -95,7 +146,10 @@ public sealed class ArchiveClient : IArchiveClient
         }
     }
 
-    private async Task WaitForSlotAsync()
+    private static bool IsNetworkFailure(Exception ex, CancellationToken ct) =>
+        ex is HttpRequestException || (ex is TaskCanceledException && !ct.IsCancellationRequested);   // HttpClient timeout
+
+    private async Task WaitForSlotAsync(CancellationToken ct)
     {
         TimeSpan wait;
         lock (paceLock)
@@ -105,7 +159,7 @@ public sealed class ArchiveClient : IArchiveClient
             wait = start - now;
             nextRequestUtc = start + interval;
         }
-        if (wait > TimeSpan.Zero) await time.DelayAsync(wait).ConfigureAwait(false);
+        if (wait > TimeSpan.Zero) await time.DelayAsync(wait, ct).ConfigureAwait(false);
     }
 
     private void OnSuccess()
@@ -128,12 +182,17 @@ public sealed class ArchiveClient : IArchiveClient
         }
     }
 
+    private static TimeSpan? RetryAfter(HttpResponseMessage response)
+    {
+        var retryAfter = response.Headers.RetryAfter?.Delta;
+        if (retryAfter is null && response.Headers.RetryAfter?.Date is { } date)
+            retryAfter = date - DateTimeOffset.UtcNow;
+        return retryAfter is { } ra && ra > TimeSpan.Zero ? ra : null;
+    }
+
     private static TimeSpan Backoff(int attempt, HttpResponseMessage? response)
     {
-        var retryAfter = response?.Headers.RetryAfter?.Delta;
-        if (retryAfter is null && response?.Headers.RetryAfter?.Date is { } date)
-            retryAfter = date - DateTimeOffset.UtcNow;
-        if (retryAfter is { } ra && ra > TimeSpan.Zero)
+        if (response is not null && RetryAfter(response) is { } ra)
             return ra < TimeSpan.FromMinutes(1) ? ra : TimeSpan.FromMinutes(1);
 
         var seconds = Math.Min(30, Math.Pow(2, attempt));

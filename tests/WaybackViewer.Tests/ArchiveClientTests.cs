@@ -83,7 +83,7 @@ public class ArchiveClientTests
         var (client, handler, _) = Create(maxAttempts: 3);
         for (var i = 0; i < 5; i++) handler.Enqueue(HttpStatusCode.ServiceUnavailable);
 
-        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetStringAsync("https://x/1"));
+        var ex = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetStringAsync("https://x/1"));
         Assert.Equal(HttpStatusCode.ServiceUnavailable, ex.StatusCode);
         Assert.Equal(3, handler.Calls);
     }
@@ -93,7 +93,7 @@ public class ArchiveClientTests
     {
         var (client, handler, _) = Create();
         handler.Enqueue(HttpStatusCode.NotFound);
-        var ex = await Assert.ThrowsAsync<HttpRequestException>(() => client.GetStringAsync("https://x/missing"));
+        var ex = await Assert.ThrowsAnyAsync<HttpRequestException>(() => client.GetStringAsync("https://x/missing"));
         Assert.Equal(HttpStatusCode.NotFound, ex.StatusCode);
         Assert.Equal(1, handler.Calls);
     }
@@ -146,5 +146,31 @@ public class ArchiveClientTests
 
         handler.Hold.SetResult();
         Assert.Equal("still delivered", await patient);
+    }
+    [Fact]
+    public async Task When_every_caller_gives_up_the_download_is_cancelled()
+    {
+        var (client, handler, _) = Create();
+        handler.Hold = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cts = new CancellationTokenSource();
+
+        var call = client.GetStringAsync("https://x/abandoned", cts.Token);
+        await SampleData.Eventually(() => handler.Calls == 1);
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => call);
+
+        handler.Hold = null;
+        handler.Enqueue(HttpStatusCode.OK, "fresh");
+        Assert.Equal("fresh", await client.GetStringAsync("https://x/abandoned"));   // not served from the abandoned request
+        Assert.Equal(2, handler.Calls);
+    }
+
+    [Fact]
+    public async Task Exposes_retry_after_on_the_final_rate_limit_error()
+    {
+        var (client, handler, _) = Create(maxAttempts: 1);
+        handler.Enqueue(HttpStatusCode.TooManyRequests, "", r => r.Headers.RetryAfter = new RetryConditionHeaderValue(TimeSpan.FromSeconds(9)));
+        var ex = await Assert.ThrowsAsync<ArchiveRequestException>(() => client.GetStringAsync("https://x/limited"));
+        Assert.Equal(TimeSpan.FromSeconds(9), ex.RetryAfter);
     }
 }

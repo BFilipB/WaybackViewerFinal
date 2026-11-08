@@ -106,13 +106,14 @@
     <button id="clearSelectedOps" type="button">Clear selection</button>
     <button id="pauseWork" type="button">Pause</button>
     <button id="resumeWork" type="button">Resume</button>
-    <button id="stopWork" type="button">Stop</button>
+    <button id="retryFailed" type="button" title="Download the failed captures of this search again">Retry failed</button>
   </div>
   <div class="workflow-bars" id="workflowBars">
     <div class="wf-row"><span class="wf-label">Capture list</span><div class="wf-track"><i id="captureBar" style="width:0%"></i></div><em id="captureText">Idle</em></div>
     <div class="wf-row"><span class="wf-label">Page preload</span><div class="wf-track"><i id="preloadBar" style="width:0%"></i></div><em id="preloadText">Idle</em></div>
   </div>
   <div id="workflowTimeline" class="operation-list">No workflow events yet.</div>
+  <p id="otherUrlsInfo" class="operation-list" hidden><b>0</b> other URLs processing → <a href="/operations">Operations</a></p>
 </section>
 
 @if (Model.Error is not null)
@@ -356,6 +357,7 @@ else if (Model.CachedAt is not null)
 </div>
 
 <script>
+  function csrfToken() { return document.querySelector('meta[name="request-verification-token"]')?.content || ''; }
   const cards = [...document.querySelectorAll('.card')];
   const byId = id => document.getElementById(id);
   (function () {
@@ -567,7 +569,7 @@ else if (Model.CachedAt is not null)
         if (c.dataset.ready !== '1') keys.push(keyOf(c));
       }
       if (keys.length)
-        fetch('/Home/Prioritize', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(keys) })
+        fetch('/Home/Prioritize', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-TOKEN': csrfToken() }, body: JSON.stringify(keys) })
           .catch(() => {});
     }, 150);
   }
@@ -707,7 +709,7 @@ else if (Model.CachedAt is not null)
         const left = p.running && p.etaSeconds ? ', about ' + eta(p.etaSeconds) + ' left' : '';
         const detail = p.running ? ` [${p.inFlight} downloading, ${p.queued} queued, ${p.activeWorkers} workers, ${(p.jobs || []).filter(j => j.state === 1).length} active jobs]` : '';
         preloadStatus.textContent = (p.running ? 'Downloading and saving: ' : 'Saved: ') +
-          p.completed + ' / ' + p.total + (p.failed ? ' (' + p.failed + ' failed)' : '') + speed + left + detail;
+          p.completed + ' / ' + p.total + (p.failed ? ' (' + p.failed + ' failed)' : '') + (p.skipped ? ' (' + p.skipped + ' skipped)' : '') + speed + left + detail;
       }
       if (p.running) setTimeout(pollPreloadStatus, 1000);
     } catch { setTimeout(pollPreloadStatus, 2000); }
@@ -889,7 +891,7 @@ else if (Model.CachedAt is not null)
   maybeAutoStartExportFromQuery();
 
   // ---------------------------------------------------------------- durable background activity
-  const operationStates = ['Queued', 'Running', 'Paused', 'Stopping', 'Stopped', 'Interrupted', 'Completed', 'Failed'];
+  const operationStates = ['Queued', 'Running', 'Paused', 'Stopping', 'Stopped', 'Interrupted', 'Completed', 'Failed', 'Completed with failures'];
   const operationKinds = ['CaptureLoad', 'WaybackRefresh', 'PagePreload'];
   const activityImmediate = byId('activityImmediate');
   const workflowTimeline = byId('workflowTimeline');
@@ -905,7 +907,6 @@ else if (Model.CachedAt is not null)
   const clearSelectedOpsBtn = byId('clearSelectedOps');
   const pauseWorkBtn = byId('pauseWork');
   const resumeWorkBtn = byId('resumeWork');
-  const stopWorkBtn = byId('stopWork');
   const filterDirtyBadge = byId('filterDirtyBadge');
   const searchModeHelp = byId('searchModeHelp');
   let pendingSearch = null;
@@ -1039,7 +1040,7 @@ else if (Model.CachedAt is not null)
     try {
       const data = new FormData(searchBar);
       if (refresh) data.set('refresh', 'true');
-      const response = await fetch('/Home/StartSearch', { method: 'POST', body: data });
+      const response = await fetch('/Home/StartSearch', { method: 'POST', headers: { 'X-CSRF-TOKEN': csrfToken() }, body: data });
       if (!response.ok) throw new Error(await response.text());
        pendingSearch = await response.json();
        const current = searchContextFromForm();
@@ -1079,7 +1080,7 @@ else if (Model.CachedAt is not null)
       ? '?operationId=' + encodeURIComponent(operationId)
       : '?url=' + encodeURIComponent(searchBar.querySelector('[name=url]').value) +
         '&filter=' + encodeURIComponent(searchBar.querySelector('[name=filter]').value);
-    const response = await fetch('/Home/' + name + query, { method: 'POST' });
+    const response = await fetch('/Home/' + name + query, { method: 'POST', headers: { 'X-CSRF-TOKEN': csrfToken() } });
     if (!response.ok) throw new Error('HTTP ' + response.status);
   }
 
@@ -1103,7 +1104,6 @@ else if (Model.CachedAt is not null)
     const canBulk = !busy && (selected > 0 || activeCount > 0);
     if (pauseWorkBtn) pauseWorkBtn.disabled = !canBulk;
     if (resumeWorkBtn) resumeWorkBtn.disabled = !canBulk;
-    if (stopWorkBtn) stopWorkBtn.disabled = !canBulk;
   }
 
   async function commandSelected(name, explicitIds = null) {
@@ -1111,10 +1111,10 @@ else if (Model.CachedAt is not null)
     const ids = selectedOperationIds();
     const targetIds = explicitIds ?? ids;
     activityImmediate.textContent = name === 'Pause' ? 'Pausing downloads...' :
-      name === 'Resume' ? 'Resuming downloads...' : 'Stopping downloads...';
+      'Resuming downloads...';
     commandInFlight = true;
     updateActivityControls(lastOperations);
-    const actionButton = name === 'Pause' ? pauseWorkBtn : name === 'Resume' ? resumeWorkBtn : stopWorkBtn;
+    const actionButton = name === 'Pause' ? pauseWorkBtn : resumeWorkBtn;
     setButtonBusy(actionButton, true, name + '...');
     if (!targetIds.length) {
       try {
@@ -1158,7 +1158,24 @@ else if (Model.CachedAt is not null)
 
   if (pauseWorkBtn) pauseWorkBtn.onclick = () => commandSelected('Pause');
   if (resumeWorkBtn) resumeWorkBtn.onclick = () => commandSelected('Resume');
-  if (stopWorkBtn) stopWorkBtn.onclick = () => commandSelected('Stop');
+  const retryFailedBtn = byId('retryFailed');
+  if (retryFailedBtn) retryFailedBtn.onclick = async () => {
+    setButtonBusy(retryFailedBtn, true, 'Retrying...');
+    try {
+      const query = '?url=' + encodeURIComponent(searchBar.querySelector('[name=url]').value) +
+        '&filter=' + encodeURIComponent(searchBar.querySelector('[name=filter]').value);
+      const response = await fetch('/Home/RetryFailed' + query, { method: 'POST', headers: { 'X-CSRF-TOKEN': csrfToken() } });
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      const result = await response.json();
+      activityImmediate.textContent = result.reset ? 'Retrying ' + result.reset + ' failed downloads...' : 'No failed downloads to retry.';
+      pollWorkflow();
+      pollPreloadStatus();
+    } catch {
+      activityImmediate.textContent = 'Could not retry failed downloads.';
+    } finally {
+      setButtonBusy(retryFailedBtn, false);
+    }
+  };
 
   workflowTimeline.addEventListener('change', e => {
     const cb = e.target.closest('.operation-select');
@@ -1193,8 +1210,7 @@ else if (Model.CachedAt is not null)
           const controls = active
             ? `<label><input type="checkbox" class="operation-select" value="${o.id}"${checked} aria-label="Select ${esc(kindText(o.kind))} for ${esc(o.prefix)}"></label>
                <button type="button" data-operation-command="Pause" data-operation-id="${o.id}">Pause</button>
-               <button type="button" data-operation-command="Resume" data-operation-id="${o.id}">Resume</button>
-               <button type="button" data-operation-command="Stop" data-operation-id="${o.id}">Stop</button>`
+               <button type="button" data-operation-command="Resume" data-operation-id="${o.id}">Resume</button>`
             : '';
           return `<div class="operation"><span>${controls}</span><strong>${esc(kindText(o.kind))}: ${esc(o.prefix)}</strong><span>${esc(stateText(o.state))}${progress}</span>${error}</div>`;
         }).join('')
@@ -1202,13 +1218,17 @@ else if (Model.CachedAt is not null)
     updateActivityControls(lastOperations);
   }
 
+  const otherUrlsInfo = document.getElementById('otherUrlsInfo');
+  let wfTimer = null;
+  const wfLater = ms => { clearTimeout(wfTimer); wfTimer = setTimeout(pollWorkflow, ms); };
   async function pollWorkflow() {
+    clearTimeout(wfTimer);
     try {
       const q = currentQuery();
       if (!q.url) return;
       const [wfResponse, opResponse] = await Promise.all([
         fetch('/Home/WorkflowStatus?url=' + encodeURIComponent(q.url) + '&filter=' + encodeURIComponent(q.filter)),
-        fetch('/Home/OperationStatus')
+        fetch('/Home/OperationStatus?url=' + encodeURIComponent(q.url) + '&filter=' + encodeURIComponent(q.filter))
       ]);
       if (!wfResponse.ok) return;
       const wf = await wfResponse.json();
@@ -1217,10 +1237,14 @@ else if (Model.CachedAt is not null)
       renderBar(captureBar, captureText, wf.captureLoad);
       renderBar(preloadBar, preloadText, wf.preload);
       renderOperationTimeline(operations);
+      if (otherUrlsInfo) {
+        otherUrlsInfo.hidden = !(wf.otherActiveUrls > 0);
+        otherUrlsInfo.querySelector('b').textContent = wf.otherActiveUrls || 0;
+      }
 
       if (pendingSearch) {
         const captureState = String(wf.captureLoad?.state || '');
-        if (captureState === 'Completed' || captureState === 'Failed') {
+        if (captureState === 'Completed' || captureState === 'Failed' || captureState === 'CompletedWithFailures') {
           const target = '/?url=' + encodeURIComponent(pendingSearch.prefix) + '&filter=' + encodeURIComponent(pendingSearch.filter) + '&pagination=' + encodeURIComponent(pendingSearch.pagination || 'server') + '&pageSize=' + encodeURIComponent(pendingSearch.pageSize || 50);
           pendingSearch = null;
           location.href = target;
@@ -1235,9 +1259,10 @@ else if (Model.CachedAt is not null)
       }
 
       const active = wf.captureLoad?.active || wf.preload?.active || (operations || []).some(o => [0,1,2,3,5].includes(o.state)) || (pendingSearch && Date.now() - (pendingSearch.requestedAt || 0) < 8000) || q.active;
-      if (active) setTimeout(pollWorkflow, 1000);
-    } catch { setTimeout(pollWorkflow, 2000); }
+      if (active) wfLater(window.wbLive && window.wbLive.connected ? 10000 : 1000);   // events trigger an immediate refresh
+    } catch { wfLater(2000); }
   }
+  window.addEventListener('wb-operation', () => wfLater(150));
   pollWorkflow();
 
   // ---------------------------------------------------------------- instant feel
@@ -1303,12 +1328,26 @@ else if (Model.CachedAt is not null)
       })();
       // Suggest only URLs that already have captures in the database.
       (function knownUrlSuggestions() {
+        const input = document.querySelector('input[name="url"]');
         const list = document.getElementById('knownUrls');
-        if (!list) return;
-        fetch('/Home/KnownUrls').then(r => r.ok ? r.json() : []).then(urls => {
-          list.textContent = '';
-          (urls || []).forEach(u => { const o = document.createElement('option'); o.value = u; list.appendChild(o); });
-        }).catch(() => { });
+        if (!input || !list) return;
+        let timer = 0, controller = null;
+        input.addEventListener('input', () => {
+          clearTimeout(timer);
+          const term = input.value.trim();
+          if (term.length < 2) { list.textContent = ''; return; }
+          timer = setTimeout(() => {
+            if (controller) controller.abort();
+            controller = new AbortController();
+            fetch('/urls/suggest?q=' + encodeURIComponent(term), { signal: controller.signal })
+              .then(r => r.ok ? r.json() : [])
+              .then(items => {
+                list.textContent = '';
+                (items || []).forEach(s => { const o = document.createElement('option'); o.value = s.prefix; o.label = s.captures + ' captures'; list.appendChild(o); });
+              })
+              .catch(e => { if (e.name !== 'AbortError') console.warn('Autocomplete failed', e); });
+          }, 200);
+        });
       })();
       // 5) Copy a link to this view; save and recall named views.
       (function viewTools() {

@@ -35,6 +35,7 @@ public class GenericSqlStoreOnSqliteTests : IDisposable
     [InlineData(nameof(StoreScenarios.LargeSearchRoundTrip))]
     [InlineData(nameof(StoreScenarios.PagedSearchRetrieval))]
     [InlineData(nameof(StoreScenarios.ConcurrentSavesDoNotCollide))]
+    [InlineData(nameof(StoreScenarios.OutcomesRoundTripAndResetFailed))]
     public Task Scenario(string name) => StoreScenarios.Run(name, NewStore());
 
     [Fact]

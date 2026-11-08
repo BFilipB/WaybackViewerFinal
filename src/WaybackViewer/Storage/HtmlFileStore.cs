@@ -81,6 +81,20 @@ public sealed class HtmlFileStore
 
     public bool Exists(Capture capture) => File.Exists(PathFor(capture));
 
+    /// Size of the stored payload in bytes (0 when there is no file).
+    public long SizeOf(Capture capture)
+    {
+        var info = new FileInfo(PathFor(capture));
+        return info.Exists ? info.Length : 0;
+    }
+
+    /// Removes the payload file. Idempotent: a missing file or folder is already the desired state.
+    public void Delete(Capture capture)
+    {
+        try { File.Delete(PathFor(capture)); }
+        catch (DirectoryNotFoundException) { /* nothing stored for this capture */ }
+    }
+
     private static string HostOf(string original)
     {
         if (!Uri.TryCreate(original, UriKind.Absolute, out var uri) || string.IsNullOrWhiteSpace(uri.Host))

@@ -62,6 +62,12 @@ public static class SearchTextMatcher
         return false;
     }
 
+    /// Per query token, the spellings (as typed, Cyrillic<->Latin) of which a stored text may contain any one.
+    public static IReadOnlyList<IReadOnlyList<string>> QueryTokenVariants(string query) =>
+        Tokenize(query ?? string.Empty)
+            .Select(t => (IReadOnlyList<string>)BuildVariants(t).Where(v => v.Length > 0).Distinct(StringComparer.Ordinal).ToList())
+            .Where(v => v.Count > 0).ToList();
+
     private static List<string> Tokenize(string value) =>
         Normalize(value)
             .Split(' ', StringSplitOptions.RemoveEmptyEntries)

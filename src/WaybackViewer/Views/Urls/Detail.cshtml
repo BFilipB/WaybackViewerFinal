@@ -1,0 +1,54 @@
+@model WaybackViewer.Models.UrlDetailViewModel
+@{
+	ViewData["Title"] = Model.Summary.Prefix;
+	string Link(int page) =>
+		"/urls/" + Model.Summary.Id + "?page=" + page + "&pageSize=" + Model.PageSize +
+		(Model.Mime is null ? "" : "&mime=" + Uri.EscapeDataString(Model.Mime)) +
+		(Model.Status is null ? "" : "&status=" + Uri.EscapeDataString(Model.Status)) +
+		(string.IsNullOrEmpty(Model.From) ? "" : "&from=" + Uri.EscapeDataString(Model.From)) +
+		(string.IsNullOrEmpty(Model.To) ? "" : "&to=" + Uri.EscapeDataString(Model.To));
+}
+<section class="ops-page">
+<h1>@Model.Summary.Prefix <small>(@Model.Summary.Filter)</small></h1>
+<p>@Model.Summary.CaptureCount captures · @Model.Summary.PreloadPercent% preloaded ·
+<a href="/?url=@Uri.EscapeDataString(Model.Summary.Prefix)&amp;filter=@Uri.EscapeDataString(Model.Summary.Filter)">Open in viewer</a> ·
+<a href="/urls">Back to searched URLs</a></p>
+<ul class="ops-status">
+@foreach (var o in Model.Operations)
+{
+<li>@o.Kind: @o.State (@o.Completed / @o.Total)</li>
+}
+</ul>
+<form method="get" action="/urls/@Model.Summary.Id" class="ops-filters">
+<input name="mime" value="@Model.Mime" placeholder="MIME type" aria-label="MIME type" maxlength="100" />
+<input name="status" value="@Model.Status" placeholder="Status" aria-label="Status code" maxlength="10" size="6" />
+<input type="date" name="from" value="@Model.From" aria-label="From date" />
+<input type="date" name="to" value="@Model.To" aria-label="To date" />
+<button type="submit">Filter</button>
+</form>
+<table class="ops-table" id="capturesTable">
+<thead><tr><th>Captured</th><th>URL</th><th>Type</th><th>Status</th><th>Saved</th><th></th></tr></thead>
+<tbody>
+@foreach (var c in Model.Captures)
+{
+<tr data-ts="@c.Capture.Timestamp">
+<td>@c.Capture.Timestamp</td>
+<td>@c.Capture.Original</td>
+<td>@c.Capture.MimeType</td>
+<td>@c.Capture.StatusCode</td>
+<td>@(c.Ready ? "Yes" : "No")</td>
+<td><a href="/Home/Frame?ts=@c.Capture.Timestamp&amp;url=@Uri.EscapeDataString(c.Capture.Original)" target="_blank" rel="noopener">View</a></td>
+</tr>
+}
+@if (Model.Captures.Count == 0)
+{
+<tr><td colspan="6">No captures match.</td></tr>
+}
+</tbody>
+</table>
+<nav class="pager" aria-label="Pages">
+@if (Model.Page > 1) { <a href="@Link(Model.Page - 1)" rel="prev">Previous</a> }
+<span>Page @Model.Page of @Model.TotalPages (@Model.Total captures)</span>
+@if (Model.Page < Model.TotalPages) { <a href="@Link(Model.Page + 1)" rel="next">Next</a> }
+</nav>
+</section>

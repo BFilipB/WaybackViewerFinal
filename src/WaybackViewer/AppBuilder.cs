@@ -23,7 +23,11 @@ public static class AppBuilder
         services.Configure<PreloadOptions>(builder.Configuration.GetSection("Preload"));
         services.Configure<StorageOptions>(builder.Configuration.GetSection("Storage"));
 
-        services.AddControllersWithViews().AddApplicationPart(typeof(HomeController).Assembly);
+        services.AddMemoryCache(o => o.SizeLimit = 256);   // bounded: autocomplete results
+    services.AddControllersWithViews(o => { o.Filters.Add(new Microsoft.AspNetCore.Mvc.AutoValidateAntiforgeryTokenAttribute()); o.Filters.Add<WaybackViewer.Services.RequestTimingFilter>(); })
+            .AddApplicationPart(typeof(HomeController).Assembly);
+        // JS fetch calls send the token from the page's <meta name="request-verification-token"> in this header.
+        services.AddAntiforgery(o => o.HeaderName = "X-CSRF-TOKEN");
         services.AddResponseCompression(o =>
         {
             o.Providers.Add<Microsoft.AspNetCore.ResponseCompression.BrotliCompressionProvider>();
@@ -51,6 +55,13 @@ public static class AppBuilder
         services.AddTransient<LegacyCacheImporter>();
         services.AddHostedService<StoreInitializer>();
         services.AddHostedService(sp => sp.GetRequiredService<PreloadCoordinator>());
+        services.AddSingleton<CaptureLoadRunner>();
+        services.AddHostedService(sp => sp.GetRequiredService<CaptureLoadRunner>());
+        services.AddSingleton<OperationControl>();
+        services.AddSingleton<DeleteRunner>();
+        services.AddHostedService(sp => sp.GetRequiredService<DeleteRunner>());
+        services.AddSingleton<OperationEventBus>();
+        services.AddHostedService<OperationEventPublisher>();
         services.AddSingleton<WarmupService>();
         services.AddHostedService(sp => sp.GetRequiredService<WarmupService>());
 
@@ -73,9 +84,53 @@ public static class AppBuilder
         configureServices?.Invoke(services);
 
         var app = builder.Build();
-        app.UseResponseCompression();   // big list pages and the filtered-set JSON shrink 10-20x
+        app.UseMiddleware<WaybackViewer.Services.RequestTimingMiddleware>();   // Server-Timing + slow-request log
+app.UseResponseCompression();   // big list pages and the filtered-set JSON shrink 10-20x
+		// Static assets: fingerprinted requests (?v=...) never change for a given URL, so cache them for a year;
+		// everything else revalidates (ETag) so an edited file is picked up on the next load.
+		app.UseStaticFiles(new StaticFileOptions
+		{
+			OnPrepareResponse = ctx =>
+				ctx.Context.Response.Headers.CacheControl = ctx.Context.Request.Query.ContainsKey("v")
+					? "public,max-age=31536000,immutable"
+					: "public,max-age=0,must-revalidate"
+		});
         app.UseRouting();
         app.UseRateLimiter();
+        var SseJson = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
+        app.MapGet("/operations/events", async (HttpContext ctx, OperationEventBus bus, CancellationToken ct) =>
+        {
+            long after = 0;
+            var header = ctx.Request.Headers["Last-Event-ID"].ToString();
+            if (!long.TryParse(header, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out after))
+                long.TryParse(ctx.Request.Query["after"], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out after);
+            ctx.Response.Headers.ContentType = "text/event-stream";
+            ctx.Response.Headers.CacheControl = "no-cache";
+            ctx.Response.Headers["X-Accel-Buffering"] = "no";
+            await ctx.Response.WriteAsync("retry: 3000\n\n", ct);
+            await ctx.Response.Body.FlushAsync(ct);
+            var deadline = DateTime.UtcNow.AddMinutes(5);   // client reconnects with Last-Event-ID
+            try
+            {
+                while (!ct.IsCancellationRequested && DateTime.UtcNow < deadline)
+                {
+                    foreach (var ev in bus.Since(after))
+                    {
+                        await ctx.Response.WriteAsync($"id: {ev.Id}\nevent: operation\ndata: {System.Text.Json.JsonSerializer.Serialize(ev, SseJson)}\n\n", ct);
+                        after = ev.Id;
+                    }
+                    await ctx.Response.Body.FlushAsync(ct);
+                    using var tick = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    tick.CancelAfter(TimeSpan.FromSeconds(15));
+                    try { await bus.WaitAsync(after, tick.Token); }
+                    catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                    {
+                        await ctx.Response.WriteAsync(": keep-alive\n\n", ct);   // heartbeat
+                    }
+                }
+            }
+            catch (OperationCanceledException) { /* client disconnected */ }
+        });
         app.MapGet("/healthz", async (IArchiveStore store) =>
         {
             try { await store.GetOperationsAsync(true); return Results.Ok(new { status = "ok" }); }

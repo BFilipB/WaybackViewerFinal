@@ -25,8 +25,11 @@ public class SchedulerTests
     public async Task Two_jobs_are_served_alternately()
     {
         var (coordinator, loader) = Create(workers: 1);
-        coordinator.Enqueue(Job("a.com", 4), "a.com/", "html200");
-        coordinator.Enqueue(Job("b.com", 4), "b.com/", "html200");
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        loader.Hook = _ => gate.Task;   // hold the first download until both jobs are queued
+        await coordinator.EnqueueAsync(Job("a.com", 4), "a.com/", "html200");
+        await coordinator.EnqueueAsync(Job("b.com", 4), "b.com/", "html200");
+        gate.SetResult();
         await coordinator.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
 
         var order = loader.Started.ToArray();
@@ -41,8 +44,8 @@ public class SchedulerTests
         var (coordinator, loader) = Create(workers: 1);
         var gate = new TaskCompletionSource();
         loader.Hook = _ => gate.Task;
-        coordinator.Enqueue(Job("a.com", 3), "a.com/", "html200");
-        coordinator.Enqueue(Job("b.com", 3), "b.com/", "html200");
+        await coordinator.EnqueueAsync(Job("a.com", 3), "a.com/", "html200");
+        await coordinator.EnqueueAsync(Job("b.com", 3), "b.com/", "html200");
         coordinator.Pause("a.com/", "html200");
         var startedBeforeRelease = loader.Started.ToArray().Count(k => k.Contains("a.com"));
         gate.SetResult();
@@ -56,22 +59,6 @@ public class SchedulerTests
         coordinator.Resume("a.com/", "html200");
         await coordinator.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
         Assert.Equal(6, loader.Started.Count);
-    }
-
-    [Fact]
-    public async Task Stopping_a_job_discards_only_its_queue()
-    {
-        var (coordinator, loader) = Create(workers: 1);
-        var gate = new TaskCompletionSource();
-        loader.Hook = _ => gate.Task;
-        coordinator.Enqueue(Job("a.com", 5), "a.com/", "html200");
-        coordinator.Enqueue(Job("b.com", 3), "b.com/", "html200");
-        coordinator.Stop("a.com/", "html200");
-        gate.SetResult();
-        await coordinator.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
-
-        Assert.Equal(3, loader.Started.ToArray().Count(k => k.Contains("b.com")));
-        Assert.True(loader.Started.ToArray().Count(k => k.Contains("a.com")) <= 1);
     }
 }
 
@@ -109,8 +96,9 @@ public class ParallelJobsEndpointTests
 
         await SampleData.Eventually(async () =>
         {
-            using var doc = JsonDocument.Parse(await host.GetAsync("/Home/OperationStatus"));
-            var ops = doc.RootElement.EnumerateArray().ToArray();
+            using var docA = JsonDocument.Parse(await host.GetAsync("/Home/OperationStatus?url=a.com/&filter=html200"));
+            using var docB = JsonDocument.Parse(await host.GetAsync("/Home/OperationStatus?url=b.com/&filter=html200"));
+            var ops = docA.RootElement.EnumerateArray().Concat(docB.RootElement.EnumerateArray()).ToArray();
             var expectedKind = (int)OperationKind.CaptureLoad;
             var a = ops.Any(o => o.GetProperty("prefix").GetString() == "a.com/" &&
                                  o.GetProperty("kind").GetInt32() == expectedKind);

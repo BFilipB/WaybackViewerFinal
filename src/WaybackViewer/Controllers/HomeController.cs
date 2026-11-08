@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using WaybackViewer.Models;
@@ -9,6 +9,7 @@ using WaybackViewer.Storage;
 namespace WaybackViewer.Controllers;
 
 public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCoordinator preload, IArchiveStore store,
+    CaptureLoadRunner loads,
     FacetCache facetCache, IOptions<PreloadOptions> preloadOptions, ILogger<HomeController> log) : Controller
 {
     private readonly Dictionary<string, (DateTimeOffset At, List<StoredCapture> Items)> textSearchCache =
@@ -51,6 +52,55 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
 
         try
         {
+            // Fast path: a saved, fresh list is filtered, counted and paged in SQL; only this page's rows are read.
+            var contentSearch = IsContentSearch(modeOfSearch, q);
+            if (mode == "server")
+            {
+                // A content search matches saved pages only (the CaptureSearch index), so it runs as one more SQL filter.
+                var sqlFilter = new CaptureFilter(Clean(year), Clean(category), Clean(status), Clean(section),
+                    contentSearch ? null : Clean(q), UrlClassifier.NormalizeKind(type), IsTrue(unique));
+                var fresh = await catalog.TryGetFreshStateAsync(prefix, activeFilter, refresh, ct);
+                var sqlTerm = contentSearch ? ContentTerm(q) : null;
+                var sqlPage = fresh is null ? null : popularityActive
+                    ? await store.GetPopularPageAsync(prefix, activeFilter, sqlFilter, page, pageSize, sqlTerm,
+                        new PopularityQuery(sortMode, popularityMode, popularityThreshold), ct)
+                    : await store.GetFilteredPageAsync(prefix, activeFilter, sqlFilter, page, pageSize, sqlTerm, ct);
+                if (fresh is not null && sqlPage is not null)
+                {
+                    // A content search can only match saved pages, so it keeps saving all of them.
+                    var everythingRequested = contentSearch || IsTrue(downloadAll) ||
+                        string.Equals(preloadOptions.Value.Scope, "all", StringComparison.OrdinalIgnoreCase);
+                    var prefetching = Request.Headers.TryGetValue("Sec-Purpose", out var sqlPurpose) &&
+                        sqlPurpose.ToString().Contains("prefetch", StringComparison.OrdinalIgnoreCase);
+                    var needed = everythingRequested ? sqlPage.UnsavedHtmlTotal : sqlPage.UnsavedHtmlInView;
+                    if (!prefetching && needed > 0)
+                    {
+                        var queueFilter = everythingRequested ? new CaptureFilter() : sqlFilter;
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await preload.EnqueueFilteredAsync(prefix, activeFilter, queueFilter, sqlPage.HtmlTotal,
+                                    sqlPage.UnsavedHtmlTotal, needed, boost: !everythingRequested);
+                            }
+                            catch (Exception ex) { log.LogWarning(ex, "Queueing downloads failed"); }
+                        });
+                    }
+                    var hidden = everythingRequested ? 0 : Math.Max(0, sqlPage.UnsavedHtmlTotal - sqlPage.UnsavedHtmlInView);
+                    var sqlPages = Math.Max(1, (int)Math.Ceiling(sqlPage.Total / (double)pageSize));
+                    if (popularityActive)
+                    {
+                        _popularityCache = new Dictionary<string, PageMetadata>(sqlPage.Popularity ?? new Dictionary<string, PageMetadata>(), StringComparer.Ordinal);
+                        _popularityExcluded = sqlPage.PopularityExcluded;
+                        _popularityPresets = sqlPage.Presets is null ? null : [.. sqlPage.Presets];
+                        _popularityHistogram = sqlPage.Histogram is null ? null : [.. sqlPage.Histogram];
+                    }
+                    return View(WithPopularity(new CaptureListViewModel(prefix, activeFilter, sqlPage.Captures, null,
+                        fresh.FromDatabase, sqlPage.CachedAt, mode, Math.Min(sqlPage.Page, sqlPages), pageSize, sqlPage.Total,
+                        sqlPage.Facets, contentSearch ? sqlFilter with { Text = ContentTerm(q) } : sqlFilter, modeOfSearch, sqlPage.GroupSizes, hidden, false, sortMode,
+                        popularityMode, popularityThreshold)) with { PopularityPending = popularityActive ? sqlPage.PopularityPending : 0 });
+                }
+            }
             var result = await catalog.GetAsync(prefix, activeFilter, refresh, ct);
             var hiddenNotSaved = 0;
             var everything = result.Snapshot.Captures;
@@ -72,9 +122,9 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
 
                 var boost = !downloadEverything;
                 // Off the request: queueing tens of thousands of downloads must never delay drawing the page.
-                _ = Task.Run(() =>
+                _ = Task.Run(async () =>
                 {
-                    try { preload.EnqueueView(queue, prefix, activeFilter, boost); }
+                    try { await preload.EnqueueViewAsync(queue, prefix, activeFilter, boost); }
                     catch (Exception ex) { log.LogWarning(ex, "Queueing downloads failed"); }
                 });
             }
@@ -155,7 +205,8 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         }
         catch (Exception ex)
         {
-            return View(new CaptureListViewModel(prefix, activeFilter, [], ex.Message, PaginationMode: mode, PageSize: pageSize, SearchMode: modeOfSearch,
+            log.LogWarning(ex, "Loading captures for {Prefix} failed", prefix);
+            return View(new CaptureListViewModel(prefix, activeFilter, [], CaptureCatalog.DescribeFailure(ex), PaginationMode: mode, PageSize: pageSize, SearchMode: modeOfSearch,
                 SortMode: sortMode, PopularityMetric: popularityMode, MinPopularity: popularityThreshold));
         }
     }
@@ -257,9 +308,9 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         if (Request.Headers.TryGetValue("Sec-Purpose", out var purpose) &&
             purpose.ToString().Contains("prefetch", StringComparison.OrdinalIgnoreCase)) return;
         var queue = _popularityPending.Values.ToList();
-        _ = Task.Run(() =>
+        _ = Task.Run(async () =>
         {
-            try { preload.EnqueueView(queue, prefix, filter, true); }
+            try { await preload.EnqueueViewAsync(queue, prefix, filter, true); }
             catch (Exception ex) { log.LogWarning(ex, "Queueing popularity downloads failed"); }
         });
     }
@@ -336,9 +387,10 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
                     page.Parsed.Text))
                     results.Add(item);
             }
-            catch
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 // keep search resilient; skip captures that cannot be loaded
+                log.LogDebug(ex, "Full-text search skipped {Key}", item.Capture.Key);
             }
         }
 
@@ -358,9 +410,10 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
                         page.Parsed.Text))
                         results.Add(item);
                 }
-                catch
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     // keep search resilient; skip captures that cannot be loaded
+                    log.LogDebug(ex, "Full-text search skipped {Key}", item.Capture.Key);
                 }
             }
         }
@@ -384,6 +437,53 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         var activeFilter = UrlInput.NormalizeFilter(filter);
 
         var mode = NormalizeSearchMode(searchMode);
+        var exportContent = IsContentSearch(mode, q);
+        var exportFilter = new CaptureFilter(Clean(year), Clean(category), Clean(status), Clean(section),
+        	exportContent ? null : Clean(q), UrlClassifier.NormalizeKind(type), IsTrue(unique));
+        var streamSort = NormalizeSortMode(sort);
+        var streamMetric = NormalizePopularityMetric(popularityMetric);
+        var streamPopularity = streamSort != "newest" || streamMetric != "none"
+        	? new PopularityQuery(streamSort, streamMetric, streamMetric == "none" ? 0 : Math.Max(0, minPopularity)) : null;
+
+        // Streamed from SQL one page at a time: memory stays bounded however large the list is.
+        var urlText = exportFilter.Text;   // matched per row in C# (SearchTextMatcher); SQL pages stay bounded
+        exportFilter = exportFilter with { Text = null };
+        if (await catalog.TryGetFreshStateAsync(prefix, activeFilter, false, ct) is not null)
+        {
+        	const int exportPage = 2000;
+        	var term = exportContent ? ContentTerm(q) : null;
+        	async Task<FilteredPage?> ReadExportPage(int number) => streamPopularity is null
+        		? await store.GetFilteredPageAsync(prefix, activeFilter, exportFilter, number, exportPage, term, ct)
+        		: await store.GetPopularPageAsync(prefix, activeFilter, exportFilter, number, exportPage, term, streamPopularity, ct);
+
+        	var first = await ReadExportPage(1);
+        	if (first is not null)
+        	{
+        		Response.ContentType = "application/json; charset=utf-8";
+        		await using var json = new System.Text.Json.Utf8JsonWriter(Response.Body);
+        		json.WriteStartArray();
+        		var pageNumber = 1;
+        		for (var current = first; ; current = (await ReadExportPage(pageNumber))!)
+        		{
+        			foreach (var c in current.Captures)
+        			{
+        				if (urlText is not null && !SearchTextMatcher.Matches(urlText, c.Capture.Original)) continue;
+        				json.WriteStartObject();
+        				json.WriteString("ts", c.Capture.Timestamp);
+        				json.WriteString("url", c.Capture.Original);
+        				json.WriteBoolean("ready", c.Ready);
+        				json.WriteEndObject();
+        			}
+        			await json.FlushAsync(ct);
+        			if (pageNumber * exportPage >= current.Total || current.Captures.Count == 0) break;
+        			pageNumber++;
+        		}
+        		json.WriteEndArray();
+        		await json.FlushAsync(ct);
+        		return new EmptyResult();
+        	}
+        }
+
         var result = await catalog.GetAsync(prefix, activeFilter, false, ct);
         IReadOnlyList<StoredCapture> captures = result.Snapshot.Captures;
         var cf = new CaptureFilter(Clean(year), Clean(category), Clean(status), Clean(section), Clean(q),
@@ -417,7 +517,12 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         var prefix = UrlInput.NormalizePrefix(url ?? "");
         if (prefix is null || !UrlInput.IsValidCaptureUrl(original)) return BadRequest();
 
-        var result = await catalog.GetAsync(prefix, UrlInput.NormalizeFilter(filter), false, ct);
+        var historyFilter = UrlInput.NormalizeFilter(filter);
+        var rows = await store.GetUrlHistoryAsync(prefix, historyFilter, original, 60, ct);
+        if (rows is not null)
+            return Json(rows.Select(c => new { ts = c.Capture.Timestamp, status = c.Capture.StatusCode, ready = c.Ready }));
+
+        var result = await catalog.GetAsync(prefix, historyFilter, false, ct);
         return Json(result.Snapshot.Captures
             .Where(c => c.Capture.Original == original)
             .OrderByDescending(c => c.Capture.Timestamp, StringComparer.Ordinal)
@@ -439,8 +544,14 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
 
     public IActionResult PreloadStatus() => Json(preload.GetStatus());
 
-    public async Task<IActionResult> OperationStatus(CancellationToken ct = default) =>
-        Json(await store.GetOperationsAsync(activeOnly: false, ct));
+    /// Operations of one searched URL (Home shows only the current URL). Without a URL: only unfinished operations.
+    public async Task<IActionResult> OperationStatus(string? url = null, string? filter = null, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return Json(await store.GetOperationsAsync(activeOnly: true, ct));
+        var prefix = UrlInput.NormalizePrefix(url);
+        if (prefix is null) return BadRequest();
+        return Json(await store.GetOperationsForSearchAsync(prefix, UrlInput.NormalizeFilter(filter), ct));
+    }
 
     /// URLs that already have a capture list in the database (most recently used first), for the search box suggestions.
     public async Task<IActionResult> KnownUrls(CancellationToken ct = default)
@@ -462,11 +573,11 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         if (prefix is null) return BadRequest();
         var activeFilter = UrlInput.NormalizeFilter(filter);
 
-        var operations = await store.GetOperationsAsync(activeOnly: false, ct);
-        var related = operations
-            .Where(o => o.Prefix == prefix && o.Filter == activeFilter)
+        var related = (await store.GetOperationsForSearchAsync(prefix, activeFilter, ct))
             .OrderByDescending(o => o.UpdatedAt)
             .ToList();
+        var otherUrls = await store.CountOtherActiveSearchesAsync(prefix, activeFilter, ct);
+        preload.SetPriority(prefix, activeFilter);   // the URL open on Home gets a larger share of the workers
 
         BackgroundOperation? capture = related
             .FirstOrDefault(o => o.Kind is OperationKind.CaptureLoad or OperationKind.WaybackRefresh);
@@ -497,7 +608,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
             preloadCompleted,
             preloadTotal,
             preloadTotal > 0 ? Math.Round(preloadCompleted * 100.0 / Math.Max(1, preloadTotal), 1) : 0,
-            preloadState is "Queued" or "Running" or "Paused" or "Stopping" or "Interrupted",
+            preloadOp?.IsActive ?? preloadState is "Queued" or "Running" or "Paused" or "Interrupted",
             preloadError);
 
         var timeline = related
@@ -509,7 +620,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
             ? "Workflow active"
             : timeline.Count > 0 ? "Workflow idle" : "No workflow yet";
 
-        return Json(new WorkflowStatusView(message, captureBar, preloadBar, timeline));
+        return Json(new WorkflowStatusView(message, captureBar, preloadBar, timeline, otherUrls));
     }
 
     [HttpPost]
@@ -533,7 +644,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         if (!refresh && await catalog.HasFreshSnapshotAsync(prefix, activeFilter))
             return Json(new { operationId = (long?)null, cached = true, prefix, filter = activeFilter, refresh, pagination = mode, pageSize, searchMode });
         var operation = await store.CreateOrGetOperationAsync(prefix, activeFilter, kind, DateTimeOffset.UtcNow);
-        _ = RunSearchAsync(prefix, activeFilter, refresh);
+        loads.Start(prefix, activeFilter, refresh);
         return Json(new { operationId = operation.Id, prefix, filter = activeFilter, refresh, pagination = mode, pageSize, searchMode });
     }
 
@@ -553,42 +664,19 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         {
             if (state == OperationState.Paused) preload.Pause(operationId);
             else if (state == OperationState.Running) preload.Resume(operationId);
-            else if (state == OperationState.Stopped) preload.Stop(operationId);
         }
-        else if (operation.IsActive)
+        else if (OperationStates.CanTransition(operation.State, state))
         {
             await store.UpdateOperationAsync(operation with { State = state, UpdatedAt = DateTimeOffset.UtcNow });
+            if (state == OperationState.Running)
+                loads.Start(operation.Prefix, operation.Filter, operation.Kind == OperationKind.WaybackRefresh);
+        }
+        else
+        {
+            log.LogInformation("Ignored {State} for operation {Id} in state {Current}", state, operationId, operation.State);
+            return Conflict();
         }
         return NoContent();
-    }
-
-    private async Task RunSearchAsync(string prefix, string filter, bool refresh)
-    {
-        using var scope = log.BeginScope(new Dictionary<string, object?>
-        {
-            ["request"] = "run-search",
-            ["prefix"] = prefix,
-            ["filter"] = filter,
-            ["refresh"] = refresh
-        });
-        try
-        {
-            var result = await catalog.GetAsync(prefix, filter, refresh).ConfigureAwait(false);
-            if (result.Snapshot.Captures.Any(c => c.Capture.IsHtml && !c.Ready))
-                preload.Enqueue(result.Snapshot.Captures, prefix, filter);
-        }
-        catch (Exception ex)
-        {
-            var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;
-            var operation = await store.FindActiveOperationAsync(prefix, filter, kind).ConfigureAwait(false);
-            if (operation is not null)
-                await store.UpdateOperationAsync(operation with
-                {
-                    State = OperationState.Failed,
-                    UpdatedAt = DateTimeOffset.UtcNow,
-                    Error = ex.Message
-                }).ConfigureAwait(false);
-        }
     }
 
     [HttpPost]
@@ -599,12 +687,14 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         return NoContent();
     }
 
+    /// Makes the failed captures of a search pending again and queues them for download.
     [HttpPost]
-    public async Task<IActionResult> Stop([FromQuery] long? operationId = null, [FromQuery] string? url = null, [FromQuery] string? filter = null)
+    public async Task<IActionResult> RetryFailed([FromQuery] string? url, [FromQuery] string? filter, CancellationToken ct = default)
     {
-        if (operationId is not null) return await SetOperationState(operationId.Value, OperationState.Stopped);
-        preload.Stop(NormalizeOptionalUrl(url), UrlInput.NormalizeFilter(filter));
-        return NoContent();
+        var prefix = UrlInput.NormalizePrefix(url ?? "");
+        if (prefix is null) return BadRequest();
+        var reset = await preload.RetryFailedAsync(prefix, UrlInput.NormalizeFilter(filter), ct);
+        return Json(new { reset });
     }
 
     private static string? NormalizeOptionalUrl(string? url) =>
@@ -635,8 +725,17 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     {
         if (!UrlInput.IsValidTimestamp(ts) || !UrlInput.IsValidCaptureUrl(url)) return BadRequest();
 
-        var page = await pages.GetAsync(ts, url, includeHtml: true, ct);
-        if (page?.HtmlGz is null) return Redirect(ArchiveUrls.Frame(ts, url));
+		// A stored capture never changes: answer a revalidation with 304 without loading or decompressing the HTML.
+		var etag = $"\"{ts}-{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(url)))[..16]}\"";
+		if (Request.Headers.IfNoneMatch.ToString() == etag && await pages.IsStoredAsync(ts, url, ct))
+		{
+			Response.Headers.ETag = etag;
+			return StatusCode(StatusCodes.Status304NotModified);
+		}
+
+		var page = await pages.GetAsync(ts, url, includeHtml: true, ct);
+		if (page?.HtmlGz is null) return Redirect(ArchiveUrls.Frame(ts, url));
+		Response.Headers.ETag = etag;
 
         var html = FrameHtml.InjectBase(HtmlCodec.Decompress(page.HtmlGz), ArchiveUrls.Frame(ts, url));
         Response.Headers.CacheControl = "private,max-age=86400"; // a capture at a fixed timestamp never changes
@@ -644,3 +743,4 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         return Content(html, "text/html", Encoding.UTF8);
     }
 }
+

@@ -22,8 +22,26 @@ public abstract class SqlDialect
     /// Runs on every freshly opened connection (for example SQLite PRAGMAs).
     public virtual void PrepareConnection(DbConnection connection) { }
 
+    /// True when the database can run the C# URL matcher inside SQL (a registered function); otherwise free-text URL filters use the in-memory path.
+    public virtual bool SupportsUrlMatch => false;
+
     /// Runs once before the schema statements.
     public virtual void BeforeSchema(DbConnection connection) { }
+
+    /// Adds a column when the table does not have it yet (existing databases created before the column existed).
+    public virtual void EnsureColumn(DbConnection connection, string table, string column, string type)
+    {
+        using var cmd = connection.CreateCommand();
+        cmd.CommandText = $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {type}";
+        cmd.ExecuteNonQuery();
+    }
+
+    /// Larger / smaller of two numeric expressions (scalar MAX/MIN in SQLite, GREATEST/LEAST elsewhere).
+    public virtual string Greatest(string a, string b) => $"GREATEST({a}, {b})";
+    public virtual string Least(string a, string b) => $"LEAST({a}, {b})";
+
+    /// Integer part of a numeric expression, truncating toward zero.
+    public virtual string TruncToInt(string expression) => $"CAST(TRUNC({expression}) AS BIGINT)";
 
     /// Runs once after the schema statements.
     public virtual void AfterSchema(DbConnection connection) { }
