@@ -49,8 +49,8 @@ public static class ArchiveSignals
 	/// Log-scaled so heavily captured URLs and big hubs keep separating instead of saturating
 	/// (the old linear caps flattened everything above 12 captures / 20 child URLs into ties).
 	public static int RawSignal(int captures, int childUrls) =>
-		(int)Math.Round(Math.Min(60.0, 15.0 * Math.Log2(1 + Math.Max(0, captures)))
-					  + Math.Min(40.0, 6.0 * Math.Log2(1 + Math.Max(0, childUrls))));
+		(int)Math.Round(Math.Min(60.0, 7.0 * Math.Log2(1 + Math.Max(0, captures)))
+					  + Math.Min(40.0, 5.0 * Math.Log2(1 + Math.Max(0, childUrls))));
 
     /// Streaming form of Fill's raw signal (how often a URL was captured + how many captured URLs sit below it),
     /// so the signal can be persisted per capture without holding capture rows: Add every original, Seal, then Raw.

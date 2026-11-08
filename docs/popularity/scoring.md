@@ -3,7 +3,7 @@
 ## Current model (v2)
 1. **Real counts** (meta or text, median of matches): `likes*3 + comments*4 + shares*2 + views + score`, confidence 0.6.
 2. **Content estimate** when no counts: richness + visible discussion, 1..300, confidence 0.2.
-3. **Archive signal** when the page was not downloaded: `RawSignal = min(60, 15*log2(1+captures)) + min(40, 6*log2(1+childUrls))`,
+3. **Archive signal** when the page was not downloaded: `RawSignal = min(60, 7*log2(1+captures)) + min(40, 5*log2(1+childUrls))`,
    then percentile-ranked within the site to 1..100, confidence 0.1.
 4. Sorting: by effective engagement, with deterministic tie-breakers.
 
