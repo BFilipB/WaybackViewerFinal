@@ -1,6 +1,10 @@
-@model WaybackViewer.Models.UrlDetailViewModel
+﻿@model WaybackViewer.Models.UrlDetailViewModel
 @{
 	ViewData["Title"] = Model.Summary.Prefix;
+	string[] CommonMimes = { "text/html", "text/css", "text/plain", "text/xml", "application/javascript", "application/json", "application/pdf", "application/xml", "image/jpeg", "image/png", "image/gif", "image/svg+xml", "image/webp", "font/woff2", "warc/revisit", "unk" };
+	string[] CommonStatuses = { "200", "301", "302", "304", "400", "403", "404", "410", "500", "503", "-" };
+	IEnumerable<string> MimeOptions() => string.IsNullOrEmpty(Model.Mime) || CommonMimes.Contains(Model.Mime, StringComparer.OrdinalIgnoreCase) ? CommonMimes : CommonMimes.Append(Model.Mime);
+	IEnumerable<string> StatusOptions() => string.IsNullOrEmpty(Model.Status) || CommonStatuses.Contains(Model.Status) ? CommonStatuses : CommonStatuses.Append(Model.Status);
 	string Link(int page) =>
 		"/urls/" + Model.Summary.Id + "?page=" + page + "&pageSize=" + Model.PageSize +
 		(Model.Mime is null ? "" : "&mime=" + Uri.EscapeDataString(Model.Mime)) +
@@ -10,30 +14,30 @@
 }
 <section class="ops-page">
 <h1>@Model.Summary.Prefix <small>(@Model.Summary.Filter)</small></h1>
-<p>@Model.Summary.CaptureCount captures · @Model.Summary.PreloadPercent% preloaded ·
+<p>@WaybackViewer.Models.DisplayFormat.Number(Model.Summary.CaptureCount) captures · @Model.Summary.PreloadPercent% preloaded ·
 <a href="/?url=@Uri.EscapeDataString(Model.Summary.Prefix)&amp;filter=@Uri.EscapeDataString(Model.Summary.Filter)">Open in viewer</a> ·
 <a href="/urls">Back to searched URLs</a></p>
-<ul class="ops-status">
+<div class="ops-status">
 @foreach (var o in Model.Operations)
 {
-<li>@o.Kind: @o.State (@o.Completed / @o.Total)</li>
+<div class="wf-line"><span class="wf-name">@WaybackViewer.Models.DisplayFormat.OperationKindLabel(o.Kind.ToString())</span><span class="wf-badge s-@o.State.ToString().ToLowerInvariant()">@o.State</span><div class="wf-track"><i class="@(o.State.ToString() == "Failed" ? "wf-err" : (o.State.ToString().StartsWith("Completed") ? "wf-done" : "wf-on"))" style="width:@((o.Total <= 0 ? 0d : Math.Min(100d, o.Completed * 100d / o.Total)).ToString("0.#", System.Globalization.CultureInfo.InvariantCulture))%"></i></div><span class="wf-count">@WaybackViewer.Models.DisplayFormat.Number(o.Completed) / @WaybackViewer.Models.DisplayFormat.Number(o.Total) @WaybackViewer.Models.DisplayFormat.Percent(o.Completed, o.Total)</span></div>
 }
-</ul>
+</div>
 <form method="get" action="/urls/@Model.Summary.Id" class="ops-filters">
-<input name="mime" value="@Model.Mime" placeholder="MIME type" aria-label="MIME type" maxlength="100" />
-<input name="status" value="@Model.Status" placeholder="Status" aria-label="Status code" maxlength="10" size="6" />
+<select name="mime" aria-label="MIME type"><option value="">All types</option>@foreach (var m in MimeOptions()) {<option value="@m" selected="@(string.Equals(m, Model.Mime, StringComparison.OrdinalIgnoreCase))">@m</option>}</select>
+<select name="status" aria-label="Status code"><option value="">All statuses</option>@foreach (var s in StatusOptions()) {<option value="@s" selected="@(s == Model.Status)">@s</option>}</select>
 <input type="date" name="from" value="@Model.From" aria-label="From date" />
 <input type="date" name="to" value="@Model.To" aria-label="To date" />
 <button type="submit">Filter</button>
 </form>
-<table class="ops-table" id="capturesTable">
+<div class="table-scroll"><table class="ops-table" id="capturesTable">
 <thead><tr><th>Captured</th><th>URL</th><th>Type</th><th>Status</th><th>Saved</th><th></th></tr></thead>
 <tbody>
 @foreach (var c in Model.Captures)
 {
 <tr data-ts="@c.Capture.Timestamp">
-<td>@c.Capture.Timestamp</td>
-<td>@c.Capture.Original</td>
+<td title="@c.Capture.Timestamp">@WaybackViewer.Models.DisplayFormat.Timestamp(c.Capture.Timestamp)</td>
+<td class="cell-fill" title="@c.Capture.Original">@c.Capture.Original</td>
 <td>@c.Capture.MimeType</td>
 <td>@c.Capture.StatusCode</td>
 <td>@(c.Ready ? "Yes" : "No")</td>
@@ -45,7 +49,7 @@
 <tr><td colspan="6">No captures match.</td></tr>
 }
 </tbody>
-</table>
+</table></div>
 <nav class="pager" aria-label="Pages">
 @if (Model.Page > 1) { <a href="@Link(Model.Page - 1)" rel="prev">Previous</a> }
 <span>Page @Model.Page of @Model.TotalPages (@Model.Total captures)</span>

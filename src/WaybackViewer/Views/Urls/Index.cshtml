@@ -1,4 +1,4 @@
-@model WaybackViewer.Models.UrlListViewModel
+﻿@model WaybackViewer.Models.UrlListViewModel
 @{
 	ViewData["Title"] = "Searched URLs";
 	string Link(string? sort, string? after, long afterId) =>
@@ -17,18 +17,18 @@
 </select>
 <button type="submit">Apply</button>
 </form>
-<table class="ops-table" id="urlsTable">
+<div class="table-scroll"><table class="ops-table" id="urlsTable">
 <thead><tr><th>URL</th><th>Captures</th><th>First</th><th>Last</th><th>Preloaded</th><th>Last refresh</th><th></th></tr></thead>
 <tbody>
 @foreach (var u in Model.Items)
 {
 <tr data-url-id="@u.Id">
-<td><a href="/urls/@u.Id">@u.Prefix</a> <small>(@u.Filter)</small></td>
-<td>@u.CaptureCount</td>
-<td>@u.FirstTimestamp</td>
-<td>@u.LastTimestamp</td>
+<td class="cell-fill" title="@u.Prefix"><a href="/urls/@u.Id">@u.Prefix</a> <small>(@u.Filter)</small></td>
+<td>@WaybackViewer.Models.DisplayFormat.Number(u.CaptureCount)</td>
+<td>@WaybackViewer.Models.DisplayFormat.Timestamp(u.FirstTimestamp)</td>
+<td>@WaybackViewer.Models.DisplayFormat.Timestamp(u.LastTimestamp)</td>
 <td><progress max="100" value="@u.PreloadPercent" aria-label="Preloaded"></progress> @u.PreloadPercent%</td>
-<td>@u.LastRefresh.ToString("yyyy-MM-dd HH:mm")</td>
+<td>@u.LastRefresh.ToString("yyyy-MM-dd")</td>
 <td><a href="/?url=@Uri.EscapeDataString(u.Prefix)&amp;filter=@Uri.EscapeDataString(u.Filter)">Open</a></td>
 </tr>
 }
@@ -37,7 +37,7 @@
 <tr><td colspan="7">No searched URLs found.</td></tr>
 }
 </tbody>
-</table>
+</table></div>
 <nav class="pager" aria-label="Pages">
 @if (!Model.IsFirstPage) { <a href="@Link(Model.Sort, null, 0)">First page</a> }
 @if (Model.HasMore) { <a href="@Link(Model.Sort, Model.NextKey, Model.NextId)" rel="next">Next</a> }

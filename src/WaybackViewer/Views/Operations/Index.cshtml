@@ -1,4 +1,4 @@
-@model OperationsPageModel
+﻿@model OperationsPageModel
 @{
 	ViewData["Title"] = "Operations";
 	string Qs(int page, string? state, string? type)
@@ -55,7 +55,8 @@
   }
   else
   {
-	<table class="ops-table" id="opsTable">
+	<div class="table-scroll"><table class="ops-table" id="opsTable">
+	  <colgroup><col style="width:28px"><col><col style="width:92px"><col style="width:96px"><col style="width:96px"><col style="width:56px"><col style="width:56px"><col style="width:52px"><col style="width:56px"><col style="width:56px"><col style="width:56px"><col style="width:120px"><col style="width:300px"></colgroup>
 	  <thead>
 		<tr>
 		  <th><input type="checkbox" id="opsAll" aria-label="Select all rows on this page" /></th>
@@ -68,7 +69,7 @@
 		{
 		  <tr data-prefix="@row.Prefix" data-filter="@row.Filter">
 			<td><input type="checkbox" class="ops-pick" aria-label="Select @row.Prefix" /></td>
-			<td class="ops-url"><a href="/?url=@Uri.EscapeDataString(row.Prefix)&amp;filter=@Uri.EscapeDataString(row.Filter)">@row.Prefix</a> <small>@row.Filter</small></td>
+			<td class="ops-url cell-clip" title="@row.Prefix @row.Filter"><a href="/?url=@Uri.EscapeDataString(row.Prefix)&amp;filter=@Uri.EscapeDataString(row.Filter)">@row.Prefix</a> <small>@row.Filter</small></td>
 			<td><span class="ops-badge ops-@row.State.ToLowerInvariant()" data-f="state">@row.State</span></td>
 			<td><div class="wf-track"><i class="@Bar(row.CaptureLoad)" data-f="captureBar" style="width:@(row.CapturePercent.ToString(System.Globalization.CultureInfo.InvariantCulture))%"></i></div><small data-f="captureText">@Count(row.CaptureLoad)</small></td>
 			<td><div class="wf-track"><i class="@Bar(row.Preload)" data-f="preloadBar" style="width:@(row.PreloadPercent.ToString(System.Globalization.CultureInfo.InvariantCulture))%"></i></div><small data-f="preloadText">@Count(row.Preload)</small></td>
@@ -78,18 +79,18 @@
 			<td data-f="pending">@row.Pending</td>
 			<td data-f="speed">@(row.PerSecond > 0 ? row.PerSecond + "/s" : "–")</td>
 			<td data-f="eta">@Eta(row.EtaSeconds)</td>
-			<td class="operation-error" data-f="error">@row.LastError</td>
+			<td class="operation-error cell-clip" data-f="error" title="@row.LastError">@row.LastError</td>
 			<td class="ops-actions">
 			  <button type="button" data-row="@(row.Paused ? "resume" : "pause")">@(row.Paused ? "Resume" : "Pause")</button>
-			  <button type="button" data-row="retry-failed">Retry failed</button>
-			  <button type="button" data-row="refresh">Refresh list</button>
+			  <button type="button" data-row="retry-failed" title="Retry failed pages">Retry</button>
+			  <button type="button" data-row="refresh" title="Refresh the capture list">Refresh</button>
 			  <button type="button" data-delete="pages" title="Delete the preloaded pages; the capture list stays">Delete pages</button>
               <button type="button" data-delete="all" title="Delete everything stored for this URL">Delete all</button>
 			</td>
 		  </tr>
 		}
 	  </tbody>
-	</table>
+	</table></div>
   }
 
   <div class="pager">
@@ -100,14 +101,19 @@
 </section>
 
 <style>
-  .ops-page { max-width: 1400px; }
+  .ops-page { max-width: none; }
   .ops-help { color: var(--muted); }
   .ops-filters, .ops-bulk { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
   .ops-filters a.on { font-weight: bold; text-decoration: underline; }
   .ops-table { width: 100%; border-collapse: collapse; font-size: 12px; }
   .ops-table th, .ops-table td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: left; vertical-align: middle; }
-  .ops-table .wf-track { width: 120px; }
-  .ops-url { max-width: 320px; overflow-wrap: anywhere; }
+  .ops-table .wf-track { width: 80px; }
+  #opsTable { width: 100%; table-layout: fixed; }
+  #opsTable th, #opsTable td { padding: 4px 5px; }
+  #opsTable td { overflow: hidden; text-overflow: ellipsis; }
+  #opsTable .wf-track { width: 100%; }
+  #opsTable td.ops-actions { white-space: nowrap; overflow: visible; }
+  .ops-actions button { padding: 3px 7px; font-size: 11px; margin: 0 3px 0 0; white-space: nowrap; }
   .ops-badge { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
   .ops-running, .ops-queued { color: var(--accent); }
   .ops-completed { color: var(--ok); }

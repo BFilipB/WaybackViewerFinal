@@ -1,4 +1,4 @@
-@inject Microsoft.AspNetCore.Antiforgery.IAntiforgery Antiforgery
+﻿@inject Microsoft.AspNetCore.Antiforgery.IAntiforgery Antiforgery
 <!DOCTYPE html>
 <html>
 	<head>
@@ -267,7 +267,58 @@
 			.theme-switch { width: 100%; margin-left: 0; }
 			.theme-switch select { width: 100%; }
 			}
-		</style>
+		/* shared data-table look (Searched URLs, URL detail, Operations) */
+.ops-page { max-width: 1400px; }
+.ops-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0; }
+.ops-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ops-table th, .ops-table td { border-bottom: 1px solid var(--line); padding: 5px 8px; text-align: left; }
+.ops-table thead th { background: var(--panel2); color: var(--muted); font-weight: 600; }
+.ops-table tbody tr:hover { background: var(--panel); }
+.ops-table small { color: var(--muted); }
+.pager { display: flex; gap: 12px; align-items: center; margin: 10px 0; }
+/* responsive tables: low-priority columns drop out as the window narrows (full values stay in tooltips / detail pages) */
+@@media (max-width: 1500px) {
+  #opsTable th:nth-child(7), #opsTable td:nth-child(7), #opsTable col:nth-child(7),
+  #opsTable th:nth-child(10), #opsTable td:nth-child(10), #opsTable col:nth-child(10),
+  #opsTable th:nth-child(11), #opsTable td:nth-child(11), #opsTable col:nth-child(11) { display: none; }
+}
+@@media (max-width: 1250px) {
+  #opsTable th:nth-child(12), #opsTable td:nth-child(12), #opsTable col:nth-child(12),
+  #opsTable th:nth-child(9), #opsTable td:nth-child(9), #opsTable col:nth-child(9) { display: none; }
+  #urlsTable th:nth-child(6), #urlsTable td:nth-child(6) { display: none; }
+}
+@@media (max-width: 1000px) {
+  #opsTable th:nth-child(6), #opsTable td:nth-child(6), #opsTable col:nth-child(6),
+  #opsTable th:nth-child(8), #opsTable td:nth-child(8), #opsTable col:nth-child(8) { display: none; }
+  #urlsTable th:nth-child(4), #urlsTable td:nth-child(4),
+  #urlsTable th:nth-child(3), #urlsTable td:nth-child(3),
+  #capturesTable th:nth-child(5), #capturesTable td:nth-child(5) { display: none; }
+}
+@@media (max-width: 760px) {
+  #opsTable { table-layout: auto; min-width: 640px; }
+  #opsTable col { width: auto !important; }
+  #capturesTable th:nth-child(3), #capturesTable td:nth-child(3),
+  #urlsTable th:nth-child(5), #urlsTable td:nth-child(5) { display: none; }
+  .ops-table th, .ops-table td { padding: 4px 6px; }
+  .ops-filters input, .ops-filters select { flex: 1 1 140px; min-width: 0; }
+  .pager { flex-wrap: wrap; }
+}
+/* tables: never wrap cells; wide tables scroll inside their wrapper */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+.table-scroll > table { width: 100%; }
+td.cell-fill { width: 100%; max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.wf-line { display: flex; align-items: center; gap: 10px; margin: 6px 0; font-size: 13px; }
+.wf-line .wf-name { min-width: 110px; font-weight: 600; }
+.wf-line .wf-track { flex: 1; max-width: 360px; width: auto; }
+.wf-line .wf-count { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wf-badge { padding: 1px 9px; border-radius: 999px; border: 1px solid var(--line); font-size: 12px; }
+.wf-badge.s-running, .wf-badge.s-queued { color: var(--accent); }
+.wf-badge.s-completed { color: var(--ok); }
+.wf-badge.s-failed, .wf-badge.s-completedwithfailures { color: #ff9d9d; }
+.wf-badge.s-paused { color: var(--muted); }
+table th, table td { white-space: nowrap; }
+td.cell-clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
+</style>
 	</head>
 	<body>
 		<header class="spy-header" role="banner">

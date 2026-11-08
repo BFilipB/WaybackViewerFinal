@@ -1,4 +1,4 @@
-@model CaptureListViewModel
+﻿@model CaptureListViewModel
 @{
     ViewData["Title"] = "Wayback Viewer";
     var readyCount = Model.Captures.Count(c => c.Ready);
@@ -128,11 +128,11 @@ else if (string.IsNullOrEmpty(Model.Url))
 }
 else if (Model.FromDatabase && Model.CachedAt is not null)
 {
-  <p class="cache-info">Loaded from the database: @Model.CachedAt.Value.LocalDateTime.ToString("yyyy-MM-dd HH:mm")</p>
+  <p class="cache-info">Loaded from the database: @Model.CachedAt.Value.LocalDateTime.ToString("yyyy-MM-dd")</p>
 }
 else if (Model.CachedAt is not null)
 {
-  <p class="cache-info">Loaded from Wayback and saved to the database: @Model.CachedAt.Value.LocalDateTime.ToString("yyyy-MM-dd HH:mm")</p>
+  <p class="cache-info">Loaded from Wayback and saved to the database: @Model.CachedAt.Value.LocalDateTime.ToString("yyyy-MM-dd")</p>
 }
 
 @if (Model.Refreshing)
@@ -294,7 +294,7 @@ else if (Model.CachedAt is not null)
   var folded = Model.GroupSizes is not null && Model.GroupSizes.TryGetValue(info.GroupKey, out var groupCount) && groupCount > 1 ? groupCount : 0;
   <div class="card capture-row" data-kind="@info.Kind" data-key="@c.Capture.ArchiveUrl" data-ts="@c.Capture.Timestamp" data-url="@c.Capture.Original" data-ready="@(c.Ready ? "1" : "0")" data-frame="/Home/Frame?ts=@c.Capture.Timestamp&amp;url=@Uri.EscapeDataString(c.Capture.Original)">
     <div class="meta">
-      <div class="capture-date">@c.Capture.Date.ToString("yyyy-MM-dd HH:mm")</div>
+      <div class="capture-date">@c.Capture.Date.ToString("yyyy-MM-dd")</div>
       <div class="url" title="@c.Capture.Original">@c.Capture.Original</div>
       <div class="capture-details"><span class="kind kind-@info.Kind.ToLowerInvariant()">@info.Kind</span> Status @c.Capture.StatusCode &middot; @c.Capture.MimeType@if (folded > 0) { <span class="folded" title="Saved links that show the same thread/post/page and are hidden by 'One per thread / post'"> &middot; +@(folded - 1) more saved links</span> }</div>
       @if (Model.Popularity is not null && Model.Popularity.TryGetValue(c.Capture.Key, out var pm))
@@ -1203,16 +1203,17 @@ else if (Model.CachedAt is not null)
     const visible = (operations || []).slice(0, 24);
     workflowTimeline.innerHTML = visible.length
       ? visible.map(o => {
-          const progress = o.total ? ` (${o.completed}/${o.total})` : '';
-          const error = o.error ? ` <span class="operation-error">${esc(o.error)}</span>` : '';
           const active = [0, 1, 2, 3, 5].includes(o.state);
+          const pct = o.total ? Math.min(100, o.completed * 100 / o.total) : 0;
+          const progress = o.total ? `<span class="wf-track"><i class="${o.state === 7 ? 'wf-err' : (active ? 'wf-on' : 'wf-done')}" style="width:${pct.toFixed(1)}%"></i></span><span class="wf-count">${o.completed.toLocaleString()} / ${o.total.toLocaleString()} (${pct.toFixed(pct < 10 && pct > 0 ? 1 : 0)}%)</span>` : '';
+          const error = o.error ? ` <span class="operation-error">${esc(o.error)}</span>` : '';
           const checked = selectedOperationIdsState.has(String(o.id)) ? ' checked' : '';
           const controls = active
             ? `<label><input type="checkbox" class="operation-select" value="${o.id}"${checked} aria-label="Select ${esc(kindText(o.kind))} for ${esc(o.prefix)}"></label>
                <button type="button" data-operation-command="Pause" data-operation-id="${o.id}">Pause</button>
                <button type="button" data-operation-command="Resume" data-operation-id="${o.id}">Resume</button>`
             : '';
-          return `<div class="operation"><span>${controls}</span><strong>${esc(kindText(o.kind))}: ${esc(o.prefix)}</strong><span>${esc(stateText(o.state))}${progress}</span>${error}</div>`;
+          return `<div class="operation"><span>${controls}</span><strong>${esc(kindText(o.kind))}: ${esc(o.prefix)}</strong><span class="wf-badge">${esc(stateText(o.state))}</span>${progress}${error}</div>`;
         }).join('')
       : 'No workflow events yet.';
     updateActivityControls(lastOperations);
