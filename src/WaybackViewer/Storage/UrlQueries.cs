@@ -103,6 +103,8 @@ internal static class UrlQueries
         return reader.Read() ? ReadSummary(reader) : null;
     }
 
+    public const int MaxSuggestions = 200;
+
     public static IReadOnlyList<UrlSuggestion> Suggest(DbConnection conn, string prefix, int limit)
     {
         using var cmd = conn.CreateCommand();
@@ -114,8 +116,8 @@ internal static class UrlQueries
             ORDER BY MAX(m.CaptureCount) DESC, s.UrlPrefix ASC
             LIMIT @lim
             """;
-        Add(cmd, "@q", EscapeLike(prefix.Trim()) + "%");
-        Add(cmd, "@lim", Math.Clamp(limit, 1, 50));
+        Add(cmd, "@q", "%" + EscapeLike(prefix.Trim()) + "%");   // anywhere in the URL; empty = all
+        Add(cmd, "@lim", Math.Clamp(limit, 1, MaxSuggestions));
         var result = new List<UrlSuggestion>();
         using var reader = cmd.ExecuteReader();
         while (reader.Read()) result.Add(new UrlSuggestion(reader.GetString(0), Convert.ToInt32(reader.GetValue(1))));

@@ -84,6 +84,8 @@ public class UrlSummaryStoreTests
         var suggestions = await store.SuggestUrlsAsync("example", 20);
         Assert.Equal(["example.com/b/", "example.com/a/"], suggestions.Select(s => s.Prefix));
         Assert.Single(await store.SuggestUrlsAsync("example", 1));
+        Assert.Equal(["example.com/b/", "other.org/", "example.com/a/"], (await store.SuggestUrlsAsync("", 200)).Select(s => s.Prefix));
+        Assert.Equal(["other.org/"], (await store.SuggestUrlsAsync("org", 200)).Select(s => s.Prefix));
 
         var filtered = await store.GetUrlListAsync(Q("other", UrlSorts.Alpha, null, 0, 10));
         Assert.Equal("other.org/", Assert.Single(filtered.Items).Prefix);

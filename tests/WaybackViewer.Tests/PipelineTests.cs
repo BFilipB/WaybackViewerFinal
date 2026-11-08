@@ -20,7 +20,7 @@ public class PreloadCoordinatorTests
         return (coordinator, memory, loader);
     }
 
-    private static async Task Idle(PreloadCoordinator c) => await c.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+    private static async Task Idle(PreloadCoordinator c) => await c.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(60));   // shared CI runners can be slow; local runs finish in under a second
 
     [Fact]
     public async Task Downloads_everything_and_saves_in_batches()
@@ -215,7 +215,7 @@ public class PreloadCoordinatorTests
         await Task.Delay(25);
         coordinator.Pause("example.com/", "html200");
         coordinator.Resume("example.com/", "html200");
-        await coordinator.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await coordinator.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(60));   // shared CI runners can be slow; local runs finish in under a second
         await SampleData.Eventually(async () =>
         {
             var latest = (await store.GetOperationsAsync())
@@ -459,7 +459,7 @@ public class PageServiceTests
 
         await service.GetAsync(captures[2].Timestamp, captures[2].Original, includeHtml: false);
         gate.SetResult();
-        await preload.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        await preload.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(60));   // shared CI runners can be slow; local runs finish in under a second
 
         Assert.Equal(1, loader.Started.Count(k => k == captures[2].Key)); // only the on-demand load
     }

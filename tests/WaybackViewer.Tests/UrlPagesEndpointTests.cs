@@ -50,9 +50,22 @@ public class UrlPagesEndpointTests
         await store.SaveSearchAsync("example.com/a/", "html200", SampleData.Captures(2), DateTimeOffset.UtcNow);
         await store.SaveSearchAsync("example.com/b/", "html200", SampleData.Captures(7), DateTimeOffset.UtcNow);
 
-        Assert.Equal("[]", await host.GetAsync("/urls/suggest?q=e"));
+        var all = await host.GetAsync("/urls/suggest");   // empty term: every captured URL
+        Assert.Contains("example.com/a/", all); Assert.Contains("example.com/b/", all);
+        var narrowed = await host.GetAsync("/urls/suggest?q=com%2Fa");   // matches anywhere in the URL
+        Assert.Contains("example.com/a/", narrowed); Assert.DoesNotContain("example.com/b/", narrowed);
         var body = await host.GetAsync("/urls/suggest?q=example");
         Assert.True(body.IndexOf("example.com/b/", StringComparison.Ordinal) < body.IndexOf("example.com/a/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Home_autocomplete_shows_urls_only_not_capture_counts()
+    {
+        await using var host = await AppHost.StartAsync();
+        var html = await host.GetAsync("/");
+        Assert.Contains("/urls/suggest?q=", html);
+        Assert.Contains("o.value = s.prefix;", html);
+        Assert.DoesNotContain("o.label", html);
     }
 
     [Fact]

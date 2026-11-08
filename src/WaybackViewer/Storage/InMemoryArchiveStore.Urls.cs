@@ -65,11 +65,11 @@ public sealed partial class InMemoryArchiveStore
         List<UrlSummary> all;
         lock (gate) all = searches.Select(kv => SummaryLocked(kv.Key, kv.Value)).ToList();
         IReadOnlyList<UrlSuggestion> result = all
-            .Where(u => u.Prefix.StartsWith(prefix.Trim(), StringComparison.OrdinalIgnoreCase))
+            .Where(u => u.Prefix.Contains(prefix.Trim(), StringComparison.OrdinalIgnoreCase))
             .GroupBy(u => u.Prefix, StringComparer.Ordinal)
             .Select(g => new UrlSuggestion(g.Key, g.Max(u => u.CaptureCount)))
             .OrderByDescending(s => s.Captures).ThenBy(s => s.Prefix, StringComparer.Ordinal)
-            .Take(Math.Clamp(limit, 1, 50)).ToList();
+            .Take(Math.Clamp(limit, 1, UrlQueries.MaxSuggestions)).ToList();
         return Task.FromResult(result);
     }
 

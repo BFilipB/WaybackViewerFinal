@@ -154,7 +154,7 @@ $env:ConnectionStrings__WaybackDb = "Host=localhost;Database=wayback;Username=wa
 
 The schema is created automatically at startup. To add another database: derive from `SqlDialect`, add a provider, register it in `AppBuilder`, and add a test class that runs `StoreScenarios`. Details: **[docs/DATABASES.md](./docs/DATABASES.md)**.
 
-PostgreSQL has not been run on the author's machine; it is verified by the CI workflow. Treat it as unverified until your CI run is green.
+PostgreSQL has not been run on the author's machine; the CI workflow runs the store tests against a real PostgreSQL service. Free-text URL filters on PostgreSQL use the in-memory path (no `url_match` function there).
 
 ## 3d) Docker
 
@@ -396,17 +396,35 @@ UI interaction details:
 - `GET /Home/OperationStatus`
 - `GET /Home/PreloadStatus`
 - `GET /healthz`
+- `GET /operations/events` (Server-Sent Events: live operation updates with event IDs, catch-up after reconnect and heartbeats; the UI falls back to polling)
+
+### Pages
+
+- `GET /urls` (searched URLs: keyset paging), `GET /urls/suggest?q=` (autocomplete for the Home search box: previously searched URL prefixes, matched anywhere in the text, empty `q` = all, most captures first, max 200; only the URLs are shown in the dropdown), `GET /urls/{id}` (one URL's captures)
+- `GET /operations` (all background operations with filters; `POST /operations/{pause|resume|retry-failed|refresh|status}`, `POST /operations/delete-preview` and `POST /operations/delete`; all POSTs need the antiforgery token)
+- `GET /about`
 
 ### Capture APIs
 
-- `GET /Home/CaptureSet` (full filtered set)
-- `GET /Home/History`
+- `GET /Home/CaptureSet` (full filtered set as JSON, streamed from SQL in 2,000-row pages, so memory stays bounded for any list size)
+- `GET /Home/History` (newest 60 captures of one URL, one bounded SQL query)
+- `GET /Home/KnownUrls`
 - `GET /Home/Text`
 - `GET /Home/Frame`
 - `POST /Home/Prioritize`
 
 ---
 
+## 9b) Performance and scale
+
+- **Server-side everything:** the capture table renders one page only. Filtering (year, category, status, section, type, one-per-thread), free-text URL search, content search, popularity sort/threshold, facets and counts all run in SQL; only the current page's rows are read.
+- **Free-text URL search in SQL:** SQLite registers the app's own matcher (Cyrillic/Latin transliteration, accent folding) as a `url_match` SQL function, so results equal the in-memory matcher. Databases without it (PostgreSQL) fall back to the in-memory path for that filter only.
+- **Popularity in SQL:** per-capture archive signals are persisted (`CaptureSignals`) and rebuilt when a list is refreshed; ranking, percentile threshold, presets and histogram are SQL.
+- **Bounded memory:** export streams, history is limited, unsaved-page downloads are read in batches, caches are size-limited `IMemoryCache`.
+- **Measured** (tests, 100,000 captures, SQLite): first page and autocomplete well under 200 ms; filtered page with facets under 200 ms warm.
+- SQLite runs in WAL mode with tuned pragmas; responses are compressed and support ETag/304.
+
+---
 ## 10) Reliability and pitfalls (known + handled)
 
 ### File payload write contention
@@ -421,8 +439,11 @@ UI auto-falls back to text mode to avoid dead-end waits.
 
 ### Content search cost
 
-Content mode may trigger text loading/parsing for captures not yet locally parsed.
-Use URL mode for fast structural filtering, then content mode for deep lookup.
+Content mode searches saved pages only (the `CaptureSearch` index in SQL). Starting a content search keeps saving the remaining pages in the background, so results grow as pages are downloaded.
+
+### Slow CI runners
+
+Timing-sensitive tests use generous budgets (idle waits up to 60 s) because shared GitHub runners can be several times slower than a developer machine.
 
 ---
 

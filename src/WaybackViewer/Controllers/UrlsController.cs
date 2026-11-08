@@ -13,8 +13,8 @@ namespace WaybackViewer.Controllers;
 public class UrlsController(IArchiveStore store, IMemoryCache cache, ILogger<UrlsController> log) : Controller
 {
     public const int DefaultPageSize = 25;
-    public const int MinSuggestChars = 2;
-    public const int SuggestLimit = 20;
+    public const int MaxSuggestChars = 200;
+    public const int SuggestLimit = UrlQueries.MaxSuggestions;
     private static readonly TimeSpan SuggestTtl = TimeSpan.FromSeconds(10);
 
     [HttpGet("")]
@@ -65,12 +65,12 @@ public class UrlsController(IArchiveStore store, IMemoryCache cache, ILogger<Url
             from, to, operations));
     }
 
-    /// Autocomplete: prefix match, most captures first, at most 20 rows, briefly cached (bounded).
+    /// Autocomplete over every previously captured URL: matches anywhere in the URL (empty = all), most captures first, at most 200 rows, briefly cached (bounded).
     [HttpGet("suggest")]
     public async Task<IActionResult> Suggest(string? q, CancellationToken ct = default)
     {
         var term = (q ?? "").Trim();
-        if (term.Length < MinSuggestChars || term.Length > 200) return Json(Array.Empty<UrlSuggestion>());
+        if (term.Length > MaxSuggestChars) return Json(Array.Empty<UrlSuggestion>());
 
         var key = "suggest|" + term.ToLowerInvariant();
         if (cache.TryGetValue(key, out IReadOnlyList<UrlSuggestion>? hit) && hit is not null) return Json(hit);

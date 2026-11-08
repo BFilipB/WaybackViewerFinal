@@ -219,6 +219,32 @@
 			.capture-list.compact .capture-details { grid-column: auto; }
 			.capture-list.compact .meta .row { grid-column: auto; grid-row: auto; }
 			.card.selected { border-color: var(--accent); background: var(--panel2); }
+
+			/* card view: every part has a fixed grid cell, long text wraps or truncates, buttons never overlap text */
+			.capture-list:not(.compact) .meta { grid-template-columns: 140px minmax(0, 1fr) max-content; grid-template-areas: "date url actions" "date details actions" "date badges actions"; row-gap: 4px; align-items: start; }
+			.capture-list:not(.compact) .capture-date { grid-area: date; }
+			.capture-list:not(.compact) .url { grid-area: url; min-width: 0; }
+			.capture-list:not(.compact) .capture-details { grid-area: details; grid-column: auto; min-width: 0; overflow-wrap: anywhere; line-height: 1.5; }
+			.capture-list:not(.compact) .popularity-badges { grid-area: badges; }
+			.capture-list:not(.compact) .meta .row { grid-area: actions; grid-column: auto; grid-row: auto; align-self: center; }
+			.popularity-badges { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; color: var(--muted); }
+			.meta .row { flex-wrap: nowrap; }
+			.meta .row .btn, .meta .row button { white-space: nowrap; }
+			.capture-list.compact .popularity-badges { display: none; }
+			/* stack by the card's own width (the side panels can make it narrow on any screen) */
+			.capture-row { container-type: inline-size; }
+			@@container (max-width: 560px) {
+			.capture-list:not(.compact) .meta { grid-template-columns: minmax(0, 1fr); grid-template-areas: "date" "url" "details" "badges" "actions"; }
+			.capture-list:not(.compact) .meta .row { align-self: start; flex-wrap: wrap; }
+			}
+			/* grid of narrow cards: stack the card, buttons get their own full-width row */
+			:root[data-layout='cards'] .capture-list:not(.compact) .meta { grid-template-columns: minmax(0, 1fr); grid-template-areas: "date" "url" "details" "badges" "actions"; }
+			:root[data-layout='cards'] .capture-list:not(.compact) .meta .row { align-self: start; flex-wrap: wrap; }
+			:root[data-layout='cards'] .capture-list:not(.compact) .url { white-space: normal; overflow-wrap: anywhere; }
+			@@media (max-width: 700px) {
+			.capture-list:not(.compact) .meta { grid-template-columns: minmax(0, 1fr); grid-template-areas: "date" "url" "details" "badges" "actions"; }
+			.capture-list:not(.compact) .meta .row { align-self: start; flex-wrap: wrap; }
+			}
 			.insp-empty { color: var(--muted); font-size: 12px; }
 			.inspector dl { margin: 0; font-size: 12px; }
 			.inspector dt { color: var(--muted); text-transform: uppercase; font-size: 10px; letter-spacing: .06em; margin-top: 8px; }
