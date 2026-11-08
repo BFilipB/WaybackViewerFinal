@@ -1,4 +1,4 @@
-using WaybackViewer.Models;
+﻿using WaybackViewer.Models;
 
 namespace WaybackViewer.Storage;
 
@@ -100,6 +100,10 @@ public interface IArchiveStore
 	Task<CaptureRowsPage> GetSearchCapturesPageAsync(long searchId, UrlCaptureFilter filter, int offset, int limit,
 		CancellationToken ct = default) =>
 		throw new NotSupportedException();
+    /// Distinct MIME types / status codes of one searched URL (bounded, in SQL). Null = not supported (callers fall back to a fixed list).
+    Task<UrlCaptureOptions?> GetUrlCaptureOptionsAsync(long searchId, CancellationToken ct = default) =>
+        Task.FromResult<UrlCaptureOptions?>(null);
+
     /// One page of the facet-filtered list plus facet counts, all computed in SQL. Null = not supported / free-text
     /// filter (the caller falls back to the in-memory list).
     Task<FilteredPage?> GetFilteredPageAsync(string prefix, string filter, CaptureFilter captureFilter, int page, int pageSize,

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Logging.Abstractions;
+﻿using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using System.Text.Json;
 using WaybackViewer.Models;
@@ -39,6 +39,7 @@ public class SchedulerTests
     }
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task A_paused_job_does_not_block_other_jobs_and_resumes_later()
     {
         var (coordinator, loader) = Create(workers: 1);

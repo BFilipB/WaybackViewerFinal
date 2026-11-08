@@ -1,4 +1,4 @@
-using Capture = WaybackViewer.Models.Capture;
+﻿using Capture = WaybackViewer.Models.Capture;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using WaybackViewer.Models;
@@ -98,6 +98,7 @@ public class PaginationAndLoadTests
     }
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task Large_list_pages_render_within_a_generous_latency_budget()
     {
         await using var host = await HostAsync(5000);
@@ -115,6 +116,7 @@ public class PaginationAndLoadTests
     }
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task Filtered_and_sorted_views_of_a_large_list_stay_fast_when_repeated()
     {
         await using var host = await HostAsync(5000);

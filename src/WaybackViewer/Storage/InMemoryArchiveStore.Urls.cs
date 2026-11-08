@@ -1,4 +1,4 @@
-using WaybackViewer.Models;
+﻿using WaybackViewer.Models;
 
 namespace WaybackViewer.Storage;
 
@@ -86,11 +86,32 @@ public sealed partial class InMemoryArchiveStore
                 .Where(x => filter.Status is null || x.Capture.StatusCode == filter.Status)
                 .Where(x => filter.FromTimestamp is null || string.CompareOrdinal(x.Capture.Timestamp, filter.FromTimestamp) >= 0)
                 .Where(x => filter.ToTimestamp is null || string.CompareOrdinal(x.Capture.Timestamp, filter.ToTimestamp) <= 0)
-                .OrderByDescending(x => x.Capture.Timestamp, StringComparer.Ordinal).ThenByDescending(x => x.Id)
                 .ToList();
+            var key = (Func<(long Id, Capture Capture), string>)(CaptureSorts.Normalize(filter.Sort) switch
+            {
+                CaptureSorts.Url => x => x.Capture.Original,
+                CaptureSorts.Type => x => x.Capture.MimeType,
+                CaptureSorts.Status => x => x.Capture.StatusCode,
+                _ => x => x.Capture.Timestamp
+            });
+            rows = (filter.Descending
+                ? rows.OrderByDescending(key, StringComparer.Ordinal).ThenByDescending(x => x.Id)
+                : rows.OrderBy(key, StringComparer.Ordinal).ThenBy(x => x.Id)).ToList();
             var slice = rows.Skip(Math.Max(0, offset)).Take(Math.Clamp(limit, 1, UrlQueries.MaxLimit))
                 .Select(x => new StoredCapture(x.Id, x.Capture, pages.ContainsKey(x.Id))).ToList();
             return Task.FromResult(new CaptureRowsPage(slice, rows.Count));
+        }
+    }
+
+    public Task<UrlCaptureOptions?> GetUrlCaptureOptionsAsync(long searchId, CancellationToken ct = default)
+    {
+        lock (gate)
+        {
+            var search = searches.Values.FirstOrDefault(s => s.Id == searchId);
+            if (search.CaptureIds is null) return Task.FromResult<UrlCaptureOptions?>(new UrlCaptureOptions([], []));
+            return Task.FromResult<UrlCaptureOptions?>(new UrlCaptureOptions(
+                search.CaptureIds.Select(id => captures[id].MimeType).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Take(UrlQueries.MaxOptions).ToList(),
+                search.CaptureIds.Select(id => captures[id].StatusCode).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Take(UrlQueries.MaxOptions).ToList()));
         }
     }
 }

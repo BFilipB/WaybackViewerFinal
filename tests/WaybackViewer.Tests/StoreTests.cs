@@ -1,4 +1,4 @@
-using System.Reflection;
+﻿using System.Reflection;
 using WaybackViewer.Models;
 using WaybackViewer.Storage;
 
@@ -368,6 +368,7 @@ public class SqliteArchiveStoreTests : IDisposable
     }
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task Saving_thousands_of_pages_in_one_batch_is_fast()
     {
         var store = NewStore();

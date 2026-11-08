@@ -1,4 +1,4 @@
-ï»¿using System.Text.RegularExpressions;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.DependencyInjection;
 using WaybackViewer.Models;
 using WaybackViewer.Storage;
@@ -11,8 +11,8 @@ public class DisplayFormatTests
     [InlineData("20200728180718", "2020-07-28")]
     [InlineData("20261107054657", "2026-11-07")]
     [InlineData("20200728", "2020-07-28")]
-    [InlineData(null, "â€“")]
-    [InlineData("", "â€“")]
+    [InlineData(null, "–")]
+    [InlineData("", "–")]
     [InlineData("garbage", "garbage")]
     public void Timestamp_is_formatted_cleanly(string? input, string expected) =>
         Assert.Equal(expected, DisplayFormat.Timestamp(input));
@@ -44,7 +44,7 @@ public class TableLayoutEndpointTests
 
         var list = await host.GetAsync("/urls");
         Assert.DoesNotMatch(new Regex(@"<td>\d{14}</td>"), list);
-        Assert.Matches(new Regex(@"<td>\d{4}-\d{2}-\d{2}</td>"), list);
+        Assert.Matches(new Regex(@"<td( class=""hide-\w+"")?>\d{4}-\d{2}-\d{2}</td>"), list);
 
         var detail = await host.GetAsync($"/urls/{snap.SearchId}");
         Assert.Matches(new Regex(@"<td title=""\d{14}"">\d{4}-\d{2}-\d{2}</td>"), detail);

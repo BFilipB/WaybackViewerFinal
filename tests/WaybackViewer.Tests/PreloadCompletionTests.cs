@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using WaybackViewer.Models;
@@ -38,6 +38,7 @@ public class PreloadCompletionTests
     }
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task Transient_rate_limit_burst_after_1000_downloads_still_saves_all_5000()
     {
         var store = new InMemoryArchiveStore();

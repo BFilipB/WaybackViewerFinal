@@ -3,14 +3,23 @@
 	ViewData["Title"] = Model.Summary.Prefix;
 	string[] CommonMimes = { "text/html", "text/css", "text/plain", "text/xml", "application/javascript", "application/json", "application/pdf", "application/xml", "image/jpeg", "image/png", "image/gif", "image/svg+xml", "image/webp", "font/woff2", "warc/revisit", "unk" };
 	string[] CommonStatuses = { "200", "301", "302", "304", "400", "403", "404", "410", "500", "503", "-" };
-	IEnumerable<string> MimeOptions() => string.IsNullOrEmpty(Model.Mime) || CommonMimes.Contains(Model.Mime, StringComparer.OrdinalIgnoreCase) ? CommonMimes : CommonMimes.Append(Model.Mime);
-	IEnumerable<string> StatusOptions() => string.IsNullOrEmpty(Model.Status) || CommonStatuses.Contains(Model.Status) ? CommonStatuses : CommonStatuses.Append(Model.Status);
+	IEnumerable<string> MimeOptions() { var all = (Model.Options?.Mimes ?? CommonMimes).ToList(); if (!string.IsNullOrEmpty(Model.Mime) && !all.Contains(Model.Mime, StringComparer.OrdinalIgnoreCase)) all.Add(Model.Mime); return all; }
+	IEnumerable<string> StatusOptions() { var all = (Model.Options?.Statuses ?? CommonStatuses).ToList(); if (!string.IsNullOrEmpty(Model.Status) && !all.Contains(Model.Status)) all.Add(Model.Status); return all; }
 	string Link(int page) =>
 		"/urls/" + Model.Summary.Id + "?page=" + page + "&pageSize=" + Model.PageSize +
 		(Model.Mime is null ? "" : "&mime=" + Uri.EscapeDataString(Model.Mime)) +
 		(Model.Status is null ? "" : "&status=" + Uri.EscapeDataString(Model.Status)) +
 		(string.IsNullOrEmpty(Model.From) ? "" : "&from=" + Uri.EscapeDataString(Model.From)) +
-		(string.IsNullOrEmpty(Model.To) ? "" : "&to=" + Uri.EscapeDataString(Model.To));
+		(string.IsNullOrEmpty(Model.To) ? "" : "&to=" + Uri.EscapeDataString(Model.To)) +
+		"&sort=" + Model.Sort + "&dir=" + (Model.Desc ? "desc" : "asc");
+	string SortLink(string column, string label)
+	{
+		var active = Model.Sort == column;
+		var nextDir = active && Model.Desc ? "asc" : "desc";
+		var arrow = active ? (Model.Desc ? " &#9660;" : " &#9650;") : "";
+		var current = "&sort=" + Model.Sort + "&dir=" + (Model.Desc ? "desc" : "asc");
+		return "<a href=\"" + Link(1).Replace(current, "&sort=" + column + "&dir=" + nextDir).Replace("&", "&amp;") + "\" class=\"sort-link\">" + label + arrow + "</a>";
+	}
 }
 <section class="ops-page">
 <h1>@Model.Summary.Prefix <small>(@Model.Summary.Filter)</small></h1>
@@ -31,16 +40,16 @@
 <button type="submit">Filter</button>
 </form>
 <div class="table-scroll"><table class="ops-table" id="capturesTable">
-<thead><tr><th>Captured</th><th>URL</th><th>Type</th><th>Status</th><th>Saved</th><th></th></tr></thead>
+<thead><tr><th>@Html.Raw(SortLink("date", "Captured"))</th><th>@Html.Raw(SortLink("url", "URL"))</th><th class="hide-xs">@Html.Raw(SortLink("type", "Type"))</th><th>@Html.Raw(SortLink("status", "Status"))</th><th class="hide-sm">Saved</th><th></th></tr></thead>
 <tbody>
 @foreach (var c in Model.Captures)
 {
 <tr data-ts="@c.Capture.Timestamp">
 <td title="@c.Capture.Timestamp">@WaybackViewer.Models.DisplayFormat.Timestamp(c.Capture.Timestamp)</td>
 <td class="cell-fill" title="@c.Capture.Original">@c.Capture.Original</td>
-<td>@c.Capture.MimeType</td>
+<td class="hide-xs">@c.Capture.MimeType</td>
 <td>@c.Capture.StatusCode</td>
-<td>@(c.Ready ? "Yes" : "No")</td>
+<td class="hide-sm">@(c.Ready ? "Yes" : "No")</td>
 <td><a href="/Home/Frame?ts=@c.Capture.Timestamp&amp;url=@Uri.EscapeDataString(c.Capture.Original)" target="_blank" rel="noopener">View</a></td>
 </tr>
 }
@@ -51,8 +60,8 @@
 </tbody>
 </table></div>
 <nav class="pager" aria-label="Pages">
-@if (Model.Page > 1) { <a href="@Link(Model.Page - 1)" rel="prev">Previous</a> }
-<span>Page @Model.Page of @Model.TotalPages (@Model.Total captures)</span>
-@if (Model.Page < Model.TotalPages) { <a href="@Link(Model.Page + 1)" rel="next">Next</a> }
+@if (Model.Page > 1) { <a href="@Link(1)">&laquo; First</a> <a href="@Link(Model.Page - 1)" rel="prev">&lsaquo; Previous</a> }
+<span>Page @Model.Page of @Model.TotalPages (@WaybackViewer.Models.DisplayFormat.Number(Model.Total) captures)</span>
+@if (Model.Page < Model.TotalPages) { <a href="@Link(Model.Page + 1)" rel="next">Next &rsaquo;</a> <a href="@Link(Model.TotalPages)">Last &raquo;</a> }
 </nav>
 </section>

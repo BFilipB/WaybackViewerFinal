@@ -1,4 +1,4 @@
-using System.Data.Common;
+﻿using System.Data.Common;
 using System.Globalization;
 using System.Text;
 using WaybackViewer.Models;
@@ -148,7 +148,8 @@ internal static class UrlQueries
 
         rows.CommandText = "SELECT c.Id, c.CaptureTs, c.Original, c.MimeType, c.StatusCode, " +
                            "CASE WHEN EXISTS (SELECT 1 FROM Pages p WHERE p.CaptureId = c.Id) THEN 1 ELSE 0 END" +
-                           from + where + " ORDER BY c.CaptureTs DESC, c.Id DESC LIMIT @lim OFFSET @off";
+                           from + where + " ORDER BY " + CaptureSorts.Column(CaptureSorts.Normalize(filter.Sort)) + (filter.Descending ? " DESC" : " ASC") +
+                           (CaptureSorts.Normalize(filter.Sort) == CaptureSorts.Date ? "" : ", c.CaptureTs DESC") + (filter.Descending ? ", c.Id DESC" : ", c.Id ASC") + " LIMIT @lim OFFSET @off";
         Add(rows, "@lim", Math.Clamp(limit, 1, MaxLimit));
         Add(rows, "@off", Math.Max(0, offset));
         var items = new List<StoredCapture>();
@@ -158,6 +159,24 @@ internal static class UrlQueries
                 new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)),
                 Convert.ToInt32(reader.GetValue(5)) == 1));
         return new CaptureRowsPage(items, total);
+    }
+
+    public const int MaxOptions = 100;
+
+    /// Distinct MIME types and status codes of one search, sorted, at most MaxOptions each.
+    public static UrlCaptureOptions CaptureOptions(DbConnection conn, long searchId) =>
+        new(DistinctValues(conn, searchId, "c.MimeType"), DistinctValues(conn, searchId, "c.StatusCode"));
+
+    private static List<string> DistinctValues(DbConnection conn, long searchId, string column)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT DISTINCT " + column + " FROM SearchCaptures sc JOIN Captures c ON c.Id = sc.CaptureId WHERE sc.SearchId = @id ORDER BY 1 LIMIT @lim";
+        Add(cmd, "@id", searchId);
+        Add(cmd, "@lim", MaxOptions);
+        var values = new List<string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read()) values.Add(reader.GetString(0));
+        return values;
     }
 
     public static string EscapeLike(string value) =>

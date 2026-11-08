@@ -1,4 +1,4 @@
-using WaybackViewer.Models;
+﻿using WaybackViewer.Models;
 
 namespace WaybackViewer.Storage;
 
@@ -16,4 +16,7 @@ public sealed partial class SqliteArchiveStore
     public Task<CaptureRowsPage> GetSearchCapturesPageAsync(long searchId, UrlCaptureFilter filter, int offset, int limit,
         CancellationToken ct = default) =>
         Task.Run(() => { using var conn = Open(); return UrlQueries.Captures(conn, searchId, filter, offset, limit); }, ct);
+
+    public Task<UrlCaptureOptions?> GetUrlCaptureOptionsAsync(long searchId, CancellationToken ct = default) =>
+        Task.Run<UrlCaptureOptions?>(() => { using var conn = Open(); return UrlQueries.CaptureOptions(conn, searchId); }, ct);
 }

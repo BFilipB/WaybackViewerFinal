@@ -18,17 +18,17 @@
 <button type="submit">Apply</button>
 </form>
 <div class="table-scroll"><table class="ops-table" id="urlsTable">
-<thead><tr><th>URL</th><th>Captures</th><th>First</th><th>Last</th><th>Preloaded</th><th>Last refresh</th><th></th></tr></thead>
+<thead><tr><th>URL</th><th>Captures</th><th class="hide-sm">First</th><th class="hide-sm">Last</th><th class="hide-xs">Preloaded</th><th class="hide-md">Last refresh</th><th></th></tr></thead>
 <tbody>
 @foreach (var u in Model.Items)
 {
 <tr data-url-id="@u.Id">
 <td class="cell-fill" title="@u.Prefix"><a href="/urls/@u.Id">@u.Prefix</a> <small>(@u.Filter)</small></td>
 <td>@WaybackViewer.Models.DisplayFormat.Number(u.CaptureCount)</td>
-<td>@WaybackViewer.Models.DisplayFormat.Timestamp(u.FirstTimestamp)</td>
-<td>@WaybackViewer.Models.DisplayFormat.Timestamp(u.LastTimestamp)</td>
-<td><progress max="100" value="@u.PreloadPercent" aria-label="Preloaded"></progress> @u.PreloadPercent%</td>
-<td>@u.LastRefresh.ToString("yyyy-MM-dd")</td>
+<td class="hide-sm">@WaybackViewer.Models.DisplayFormat.Timestamp(u.FirstTimestamp)</td>
+<td class="hide-sm">@WaybackViewer.Models.DisplayFormat.Timestamp(u.LastTimestamp)</td>
+<td class="hide-xs"><progress max="100" value="@u.PreloadPercent" aria-label="Preloaded"></progress> @u.PreloadPercent%</td>
+<td class="hide-md">@u.LastRefresh.ToString("yyyy-MM-dd")</td>
 <td><a href="/?url=@Uri.EscapeDataString(u.Prefix)&amp;filter=@Uri.EscapeDataString(u.Filter)">Open</a></td>
 </tr>
 }
