@@ -29,7 +29,7 @@ public class OperationsLayoutBrowserTests
             $"page scrolls horizontally at {width}px");
         Assert.True(await page.EvaluateAsync<bool>(
             "(() => { const w = document.querySelector('.table-scroll'); return w.scrollWidth <= w.clientWidth + 1; })()"),
-            $"table scrolls horizontally at {width}px");
+            $"table scrolls horizontally at {width}px: " + await page.EvaluateAsync<string>("(() => { const w = document.querySelector('.table-scroll'); return w.scrollWidth + '/' + w.clientWidth; })()"));
 
         var tops = await page.EvaluateAsync<int[]>(
             "[...document.querySelectorAll('#opsTable .ops-actions button')].map(b => Math.round(b.getBoundingClientRect().top))");

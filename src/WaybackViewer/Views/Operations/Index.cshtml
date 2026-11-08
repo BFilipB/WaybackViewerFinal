@@ -1,4 +1,4 @@
-ï»¿@model OperationsPageModel
+@model OperationsPageModel
 @{
 	ViewData["Title"] = "Operations";
 	string Qs(int page, string? state, string? type)
@@ -8,14 +8,14 @@
 		if (type is not null) parts.Add("type=" + Uri.EscapeDataString(type));
 		return "/operations?" + string.Join("&", parts);
 	}
-	string Eta(double? seconds) => seconds is null ? "â€“" : TimeSpan.FromSeconds(seconds.Value).ToString(seconds.Value >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
+	string Eta(double? seconds) => seconds is null ? "–" : TimeSpan.FromSeconds(seconds.Value).ToString(seconds.Value >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
 	string Bar(BackgroundOperation? op) => op is null ? "" : op.State switch
 	{
 		OperationState.Failed => "wf-err",
 		OperationState.Completed or OperationState.CompletedWithFailures => "wf-done",
 		_ => "wf-on"
 	};
-	string Count(BackgroundOperation? op) => op is null ? "â€“" : $"{op.Completed}/{op.Total}";
+	string Count(BackgroundOperation? op) => op is null ? "–" : $"{op.Completed}/{op.Total}";
 	var states = new[] { (null as string, "All states"), ("active", "Active"), ("paused", "Paused"), ("completed", "Completed"), ("failures", "With failures") };
 	var types = new[] { (null as string, "All types"), ("captureload", "Capture list"), ("preload", "Page preload") };
 }
@@ -74,10 +74,10 @@
 			<td><div class="wf-track"><i class="@Bar(row.CaptureLoad)" data-f="captureBar" style="width:@(row.CapturePercent.ToString(System.Globalization.CultureInfo.InvariantCulture))%"></i></div><small data-f="captureText">@Count(row.CaptureLoad)</small></td>
 			<td><div class="wf-track"><i class="@Bar(row.Preload)" data-f="preloadBar" style="width:@(row.PreloadPercent.ToString(System.Globalization.CultureInfo.InvariantCulture))%"></i></div><small data-f="preloadText">@Count(row.Preload)</small></td>
 			<td class="hide-sm" data-f="saved">@row.Saved</td>
-			<td class="hide-lg" data-f="skipped">@(row.Skipped?.ToString() ?? "â€“")</td>
+			<td class="hide-lg" data-f="skipped">@(row.Skipped?.ToString() ?? "–")</td>
 			<td class="hide-sm" data-f="failed">@row.Failed</td>
 			<td class="hide-md" data-f="pending">@row.Pending</td>
-			<td class="hide-lg" data-f="speed">@(row.PerSecond > 0 ? row.PerSecond + "/s" : "â€“")</td>
+			<td class="hide-lg" data-f="speed">@(row.PerSecond > 0 ? row.PerSecond + "/s" : "–")</td>
 			<td class="hide-lg" data-f="eta">@Eta(row.EtaSeconds)</td>
 			<td class="operation-error cell-clip hide-md" data-f="error" title="@row.LastError">@row.LastError</td>
 			<td class="ops-actions">
@@ -94,9 +94,9 @@
   }
 
   <div class="pager">
-	@if (Model.Page > 1) { <a href="@Qs(Model.Page - 1, Model.StateFilter, Model.TypeFilter)">Â« Prev</a> }
-	<span>Page @Model.Page of @Model.PageCount Â· @Model.Total URLs</span>
-	@if (Model.Page < Model.PageCount) { <a href="@Qs(Model.Page + 1, Model.StateFilter, Model.TypeFilter)">Next Â»</a> }
+	@if (Model.Page > 1) { <a href="@Qs(Model.Page - 1, Model.StateFilter, Model.TypeFilter)">« Prev</a> }
+	<span>Page @Model.Page of @Model.PageCount · @Model.Total URLs</span>
+	@if (Model.Page < Model.PageCount) { <a href="@Qs(Model.Page + 1, Model.StateFilter, Model.TypeFilter)">Next »</a> }
   </div>
 </section>
 
@@ -111,7 +111,7 @@
   #opsTable td { overflow: hidden; text-overflow: ellipsis; }
   #opsTable .wf-track { width: 100%; }
   #opsTable td.ops-actions { white-space: nowrap; overflow: visible; }
-  .ops-actions button { padding: 3px 7px; font-size: 11px; margin: 0 3px 0 0; white-space: nowrap; }
+  .ops-actions button { padding: 2px 5px; font-size: 11px; margin: 0 2px 0 0; white-space: nowrap; }
   .ops-badge { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
   .ops-running, .ops-queued { color: var(--accent); }
   .ops-completed { color: var(--ok); }
@@ -194,7 +194,7 @@
 	el.style.width = pct + '%';
 	el.className = !op ? '' : op.state === 7 ? 'wf-err' : done ? 'wf-done' : 'wf-on';
   };
-  const eta = s => s == null ? 'â€“' : (s >= 3600 ? Math.floor(s / 3600) + ':' : '') + String(Math.floor(s % 3600 / 60)).padStart(s >= 3600 ? 2 : 1, '0') + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+  const eta = s => s == null ? '–' : (s >= 3600 ? Math.floor(s / 3600) + ':' : '') + String(Math.floor(s % 3600 / 60)).padStart(s >= 3600 ? 2 : 1, '0') + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   // Polls the status of the visible rows only.
   async function refresh() {
@@ -207,10 +207,10 @@
 	  const badge = tr.querySelector('[data-f="state"]');
 	  badge.textContent = r.state; badge.className = 'ops-badge ops-' + r.state.toLowerCase();
 	  bar(tr, 'captureBar', r.captureLoad); bar(tr, 'preloadBar', r.preload);
-	  set(tr, 'captureText', r.captureLoad ? r.captureLoad.completed + '/' + r.captureLoad.total : 'â€“');
-	  set(tr, 'preloadText', r.preload ? r.preload.completed + '/' + r.preload.total : 'â€“');
-	  set(tr, 'saved', r.saved); set(tr, 'skipped', r.skipped ?? 'â€“'); set(tr, 'failed', r.failed);
-	  set(tr, 'pending', r.pending); set(tr, 'speed', r.perSecond > 0 ? r.perSecond + '/s' : 'â€“');
+	  set(tr, 'captureText', r.captureLoad ? r.captureLoad.completed + '/' + r.captureLoad.total : '–');
+	  set(tr, 'preloadText', r.preload ? r.preload.completed + '/' + r.preload.total : '–');
+	  set(tr, 'saved', r.saved); set(tr, 'skipped', r.skipped ?? '–'); set(tr, 'failed', r.failed);
+	  set(tr, 'pending', r.pending); set(tr, 'speed', r.perSecond > 0 ? r.perSecond + '/s' : '–');
 	  set(tr, 'eta', eta(r.etaSeconds)); set(tr, 'error', r.lastError || '');
 	  const toggle = tr.querySelector('[data-row="pause"],[data-row="resume"]');
 	  toggle.dataset.row = r.paused ? 'resume' : 'pause'; toggle.textContent = r.paused ? 'Resume' : 'Pause';
