@@ -6,9 +6,11 @@ namespace WaybackViewer.Parsing;
 
 /// Site-independent popularity: real counts when the page shows them, otherwise a rough estimate from how much
 /// there is on the page. Not accurate, but good enough to rank and filter pages from any site.
+/// See docs/popularity/scoring.md.
 public static partial class PopularityEstimator
 {
     private const int ScanChars = 200_000;
+    private const int MaxMatchesPerKind = 64;
 
     [GeneratedRegex(@"(?<n>\d[\d,\.]*\s?[kKmM]?)\s*(?<w>views?|comments?|replies|reply|likes?|upvotes?|points?|votes?|shares?|reposts?)(?![a-zA-Z])",
         RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 250)]
@@ -24,25 +26,23 @@ public static partial class PopularityEstimator
 
         if (views is null || likes is null || comments is null || shares is null || score is null)
         {
+            var seen = new Dictionary<string, List<long>>(StringComparer.Ordinal);
+            var sample = text.Length > ScanChars ? text[..ScanChars] : text;
             try
             {
-                var sample = text.Length > ScanChars ? text[..ScanChars] : text;
-                foreach (Match m in CountThenWord().Matches(sample)) Apply(m);
-                foreach (Match m in WordThenCount().Matches(sample)) Apply(m);
+                foreach (Match m in CountThenWord().Matches(sample)) Collect(seen, m);
+                foreach (Match m in WordThenCount().Matches(sample)) Collect(seen, m);
             }
-            catch (RegexMatchTimeoutException) { }
-        }
-
-        void Apply(Match m)
-        {
-            var n = ParseCount(m.Groups["n"].Value);
-            if (n is null or <= 0) return;
-            var w = m.Groups["w"].Value.ToLowerInvariant();
-            if (w.StartsWith("view")) views ??= n;
-            else if (w.StartsWith("comment") || w.StartsWith("repl")) comments ??= n;
-            else if (w.StartsWith("like") || w.StartsWith("upvote")) likes ??= n;
-            else if (w.StartsWith("share") || w.StartsWith("repost")) shares ??= n;
-            else score ??= n;   // points, votes
+            catch (RegexMatchTimeoutException)
+            {
+                // Bounded scan: keep whatever matched before the timeout.
+            }
+            // Median, not first match: stray sidebar/footer counts no longer decide the page's value.
+            views ??= Median(seen, "view");
+            comments ??= Median(seen, "comment");
+            likes ??= Median(seen, "like");
+            shares ??= Median(seen, "share");
+            score ??= Median(seen, "score");
         }
 
         var hasCounts = views.HasValue || likes.HasValue || comments.HasValue || shares.HasValue || score.HasValue;
@@ -64,14 +64,36 @@ public static partial class PopularityEstimator
             found?.Source, found?.Author, found?.PublishedAt, found?.Tags, confidence);
     }
 
+    private static void Collect(Dictionary<string, List<long>> seen, Match m)
+    {
+        var n = ParseCount(m.Groups["n"].Value);
+        if (n is null or <= 0) return;
+        var w = m.Groups["w"].Value.ToLowerInvariant();
+        var kind = w.StartsWith("view") ? "view"
+            : w.StartsWith("comment") || w.StartsWith("repl") ? "comment"
+            : w.StartsWith("like") || w.StartsWith("upvote") ? "like"
+            : w.StartsWith("share") || w.StartsWith("repost") ? "share"
+            : "score";   // points, votes
+        if (!seen.TryGetValue(kind, out var list)) seen[kind] = list = new List<long>();
+        if (list.Count < MaxMatchesPerKind) list.Add(n.Value);
+    }
+
+    private static long? Median(Dictionary<string, List<long>> seen, string kind)
+    {
+        if (!seen.TryGetValue(kind, out var list) || list.Count == 0) return null;
+        list.Sort();
+        return list[(list.Count - 1) / 2];
+    }
+
     /// Bigger, richer, more linked and more discussed pages score higher. Roughly 0..300.
     public static long Estimate(string html, string text)
     {
-        var limit = Math.Min(html.Length, ScanChars);
-        var span = html.AsSpan(0, limit);
+        var span = html.AsSpan(0, Math.Min(html.Length, ScanChars));
         var links = Count(span, "<a ");
         var images = Count(span, "<img");
-        var discussion = Count(span, "comment") + Count(span, "reply") + Count(span, "replies");
+        // Visible text only: "comment" in CSS classes / scripts (e.g. comment-form boilerplate) is not discussion.
+        var visible = text.AsSpan(0, Math.Min(text.Length, ScanChars));
+        var discussion = Count(visible, "comment") + Count(visible, "repl");
         var textPart = Math.Min(text.Length / 400, 100);
         var score = textPart + Math.Min(links / 4, 60) + Math.Min(images * 2, 40) + Math.Min(discussion * 3, 100);
         return Math.Max(1, score);

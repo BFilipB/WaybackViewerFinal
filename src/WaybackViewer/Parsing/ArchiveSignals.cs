@@ -26,7 +26,7 @@ public static class ArchiveSignals
         {
             if (metadata.ContainsKey(c.Capture.Key)) continue;
             var hub = below.GetValueOrDefault(c.Capture.Original.TrimEnd('/'));
-            raw[c.Capture.Key] = Math.Min(perUrl[c.Capture.Original] * 5L, 60) + Math.Min(hub * 2L, 40);
+            raw[c.Capture.Key] = RawSignal(perUrl[c.Capture.Original], hub);
         }
 
         // Rank within each site, so a quiet site's best pages still count as popular on that site.
@@ -44,7 +44,13 @@ public static class ArchiveSignals
         return merged;
     }
 
-    public static string HostOf(string url) => Host(url);
+	public static string HostOf(string url) => Host(url);
+
+	/// Log-scaled so heavily captured URLs and big hubs keep separating instead of saturating
+	/// (the old linear caps flattened everything above 12 captures / 20 child URLs into ties).
+	public static int RawSignal(int captures, int childUrls) =>
+		(int)Math.Round(Math.Min(60.0, 15.0 * Math.Log2(1 + Math.Max(0, captures)))
+					  + Math.Min(40.0, 6.0 * Math.Log2(1 + Math.Max(0, childUrls))));
 
     /// Streaming form of Fill's raw signal (how often a URL was captured + how many captured URLs sit below it),
     /// so the signal can be persisted per capture without holding capture rows: Add every original, Seal, then Raw.
@@ -70,7 +76,7 @@ public static class ArchiveSignals
         }
 
         public int Raw(string original) =>
-            (int)(Math.Min(perUrl[original] * 5L, 60) + Math.Min(below.GetValueOrDefault(original.TrimEnd('/')) * 2L, 40));
+            RawSignal(perUrl[original], below.GetValueOrDefault(original.TrimEnd('/')));
     }
     private static string Host(string url) =>
         Uri.TryCreate(url, UriKind.Absolute, out var u) ? u.Host.ToLowerInvariant() : "";
