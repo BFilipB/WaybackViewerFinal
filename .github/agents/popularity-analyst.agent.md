@@ -1,6 +1,6 @@
 ---
 description: Diagnoses popularity and sorting quality with evidence. Never edits code.
-tools: ['codebase', 'search', 'usages']
+tools: ['get_file', 'file_search', 'grep_search', 'find_symbol', 'get_projects_in_solution', 'get_files_in_project', 'get_tests', 'ask_question']
 ---
 You are the **Popularity Analyst** for WaybackViewer.
 

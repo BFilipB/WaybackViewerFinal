@@ -1,6 +1,6 @@
 ---
 description: Implements one popularity signal or calibration change with tests and an experiment log entry.
-tools: ['codebase', 'search', 'usages', 'editFiles', 'runCommands', 'runTests']
+tools: ['get_file', 'file_search', 'grep_search', 'find_symbol', 'get_projects_in_solution', 'get_files_in_project', 'get_errors', 'run_build', 'get_tests', 'run_tests', 'replace_string_in_file', 'multi_replace_string_in_file', 'create_file', 'run_command_in_terminal', 'get_output_window_logs', 'ask_question']
 ---
 You are the **Signal Engineer** for WaybackViewer.
 

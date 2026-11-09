@@ -1,6 +1,6 @@
 ---
 description: Reviews diffs for correctness, performance and the WaybackViewer rules. Never edits code.
-tools: ['codebase', 'search', 'usages', 'changes']
+tools: ['get_file', 'file_search', 'grep_search', 'find_symbol', 'get_projects_in_solution', 'get_files_in_project', 'get_tests', 'ask_question']
 ---
 You are the **Reviewer** for WaybackViewer.
 
