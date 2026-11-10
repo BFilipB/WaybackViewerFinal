@@ -10,9 +10,24 @@
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-2b6cb0.svg" />
 </p>
 
-## Demo
+## Demo & Screenshots
 
-📹 **[Watch the demo video](https://github.com/BFilipB/WaybackViewerFinal/releases/download/v1.0.0/demo.mp4)** – See WaybackViewer in action: browse archived captures, filter results, and instantly replay archived pages.
+### 📹 Video Demo
+**[Watch the demo video](https://github.com/BFilipB/WaybackViewerFinal/releases/download/v1.0.0/demo.mp4)** – See WaybackViewer in action: browse archived captures, filter results, and instantly replay archived pages.
+
+### 📸 Screenshots
+
+| Home Screen | Search Results |
+|---|---|
+| ![Home](/assets/Wayback1.png) | ![Search](/assets/wayback3.png) |
+
+| Capture List | Details View |
+|---|---|
+| ![Captures](/assets/wayback4.png) | ![Details](/assets/wayback5.png) |
+
+| Filtered View | Replay |
+|---|---|
+| ![Filter](/assets/wayback6.png) | ![Replay](/assets/wayback7.png) |
 
 Wayback Viewer is a .NET 8 web app for loading website capture lists from the Internet Archive, browsing captures quickly,
 and persisting metadata + archived payloads for fast local replay.
