@@ -12,10 +12,7 @@
 
 ## Demo
 
-<video width="100%" style="max-width: 640px; border-radius: 8px;" controls>
-  <source src="https://github.com/BFilipB/WaybackViewerFinal/releases/download/v1.0.0/demo.mp4" type="video/mp4">
-  Your browser does not support the HTML5 video tag.
-</video>
+📹 **[Watch the demo video](https://github.com/BFilipB/WaybackViewerFinal/releases/download/v1.0.0/demo.mp4)** – See WaybackViewer in action: browse archived captures, filter results, and instantly replay archived pages.
 
 Wayback Viewer is a .NET 8 web app for loading website capture lists from the Internet Archive, browsing captures quickly,
 and persisting metadata + archived payloads for fast local replay.
