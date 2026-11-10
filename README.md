@@ -123,11 +123,11 @@ dotnet test
 
 ### Default SQLite DB location
 
-The SQLite provider fallback resolves a relative DB filename to Local AppData (outside repo):
+The SQLite provider resolves a relative DB filename under `WAYBACKVIEWER_DATA_ROOT` (`E:\` by default), in a `WaybackViewer` subdirectory:
 
-`%LOCALAPPDATA%\WaybackViewer\wayback.db`
+`E:\WaybackViewer\wayback.db`
 
-The checked-in `src/WaybackViewer/appsettings.json` currently overrides this with `E:\WaybackViewer\wayback.db` and sets HTML/log directories under `E:\WaybackViewer`. Change these machine-specific paths before running on another machine. To use the portable DB fallback, configure:
+The checked-in `src/WaybackViewer/appsettings.json` also sets explicit DB, HTML and log paths under `E:\WaybackViewer`. Change these machine-specific paths before running on another machine. There is deliberately no silent fallback to another drive when the data drive is unavailable. To resolve a relative database filename under your chosen data root, set `WAYBACKVIEWER_DATA_ROOT` to an absolute path on an available drive and configure:
 
 ```json
 "ConnectionStrings": {
@@ -150,6 +150,8 @@ Set root via:
 ```
 
 If omitted, provider-specific defaults are used.
+
+With `Storage:Provider=Memory` and an empty or omitted `Storage:HtmlRoot`, payloads stay in memory and no data drive is required. An explicit HTML root enables file-backed payloads even for Memory storage; selecting Memory alone does not clear the checked-in `E:\WaybackViewer\html-payloads` setting. Tests clear that setting or use a unique temporary directory. The smoke/load script uses temporary HTML/log directories and prints startup output plus its log location if health checks fail. Memory catalog and operation state are still lost on exit; use SQLite or PostgreSQL for resumable persistent workflows.
 
 ### Beginner-friendly Windows setup without editing tracked settings
 
@@ -319,7 +321,7 @@ Search mode and text, capture-type filter, facets (year, category, status, secti
 - **`Storage:Provider 'X' is not bundled`**: use `Sqlite`, `Memory` or `Postgres`, or add a dialect (docs/DATABASES.md).
 - **Missing popularity counts**: the saved HTML may not contain the requested field. Wait for preload or use `Preload:Scope=all` to download more pages; this does not guarantee real counts will be present.
 Stale metadata can be re-parsed from saved HTML without downloading again. Captures without page data fall back to archive-only signals (capture frequency and captured child URLs), ranked as a percentile (1-100) within a site. These are estimates, not real counts; a measured-only threshold can legitimately return no results.
-- **Where is my data?** Check `ConnectionStrings:WaybackDb`, `Storage:HtmlRoot`, and `Logging:File:Directory`; the checked-in settings use `E:\WaybackViewer`. Provider fallbacks use Local AppData on Windows; Docker uses `/data`.
+- **Where is my data?** Check `ConnectionStrings:WaybackDb`, `Storage:HtmlRoot`, and `Logging:File:Directory`; the checked-in settings use `E:\WaybackViewer`. Relative provider paths use `WAYBACKVIEWER_DATA_ROOT` (`E:\` by default); Docker uses `/data`. Unconfigured Memory stores keep payloads in memory only.
 - **Slow / HTTP 429 from the archive**: the client backs off automatically; lower `Archive:MaxConcurrency`.
 - **Port in use**: `dotnet run --project src/WaybackViewer --urls http://localhost:5090`
 - **Themes do not stick**: they live in localStorage; private windows or cleared data reset them.

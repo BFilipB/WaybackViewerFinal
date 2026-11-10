@@ -6,6 +6,31 @@ namespace WaybackViewer.Tests;
 public class HtmlPayloadFileStoreTests
 {
     [Fact]
+    public async Task Absolute_sqlite_database_defaults_payloads_beside_the_database()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wb-html-default-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var db = Path.Combine(root, "test.db");
+            var store = new SqliteArchiveStore($"Data Source={db}");
+            await store.InitializeAsync();
+            var capture = SampleData.Capture(7);
+            var html = HtmlCodec.Compress("<p>beside-database</p>");
+            await store.SavePagesAsync([new NewPage(capture, html, new ParsedPage("T", null, "x"), DateTimeOffset.UtcNow)]);
+
+            var files = new HtmlFileStore(Path.Combine(root, "html-payloads"));
+            Assert.Equal(html, await files.LoadAsync(capture));
+            var reopened = new SqliteArchiveStore($"Data Source={db}");
+            Assert.Equal(html, (await reopened.GetPageAsync(capture.Timestamp, capture.Original, true))!.HtmlGz);
+        }
+        finally
+        {
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
+    [Fact]
     public void Path_is_grouped_by_host_year_month_day()
     {
         var root = Path.Combine(Path.GetTempPath(), "wb-html-path-" + Guid.NewGuid().ToString("N"));

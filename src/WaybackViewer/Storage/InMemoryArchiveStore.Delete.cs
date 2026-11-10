@@ -12,7 +12,7 @@ public sealed partial class InMemoryArchiveStore
             var others = OtherMembersLocked(SearchKey(prefix, filter));
             var shared = search.CaptureIds.Count(others.Contains);
             var pageIds = search.CaptureIds.Where(id => !others.Contains(id) && pages.ContainsKey(id)).ToList();
-            long bytes = pageIds.Sum(id => htmlFiles.SizeOf(captures[id]));
+            long bytes = pageIds.Sum(id => htmlFiles?.SizeOf(captures[id]) ?? pages[id].HtmlGz?.LongLength ?? 0L);
             return Task.FromResult(new DeletePreview(search.CaptureIds.Count, pageIds.Count, shared, bytes));
         }
     }
@@ -77,7 +77,7 @@ public sealed partial class InMemoryArchiveStore
 
     private void RemoveCaptureDataLocked(long id)
     {
-        if (pages.Remove(id, out var page)) htmlFiles.Delete(page.Capture);
+        if (pages.Remove(id, out var page)) htmlFiles?.Delete(page.Capture);
         outcomes.Remove(id);
         captureSearchText.Remove(id);
     }

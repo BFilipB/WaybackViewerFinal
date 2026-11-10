@@ -19,7 +19,9 @@ public class StaticAssetCachingTests
             null, new Dictionary<string, string?>
             {
                 ["Storage:Provider"] = "Sqlite",
-                ["Storage:ConnectionString"] = $"Data Source={Path.Combine(root, "t.db")}",
+                ["ConnectionStrings:WaybackDb"] = $"Data Source={Path.Combine(root, "t.db")}",
+                ["Storage:HtmlRoot"] = Path.Combine(root, "html-payloads"),
+                ["Logging:File:Directory"] = "",
             });
         await app.StartAsync();
         try
@@ -35,6 +37,11 @@ public class StaticAssetCachingTests
             Assert.Contains("must-revalidate", plain.Headers.CacheControl!.ToString());
             Assert.NotNull(plain.Headers.ETag);
         }
-        finally { await app.StopAsync(); }
+        finally
+        {
+            await app.DisposeAsync();
+            Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+            Directory.Delete(root, true);
+        }
     }
 }

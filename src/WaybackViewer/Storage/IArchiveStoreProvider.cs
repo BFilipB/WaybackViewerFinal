@@ -17,17 +17,9 @@ public sealed class InMemoryArchiveStoreProvider : IArchiveStoreProvider
     public IArchiveStore Create(IConfiguration configuration)
     {
         var options = configuration.GetSection("Storage").Get<StorageOptions>() ?? new StorageOptions();
-        var root = ResolveMemoryHtmlRoot(options);
+        if (string.IsNullOrWhiteSpace(options.HtmlRoot)) return new InMemoryArchiveStore();
+        var root = AppBuilder.ResolveDatabasePath(options.HtmlRoot);
         return new InMemoryArchiveStore(new HtmlFileStore(root));
-    }
-
-    private static string ResolveMemoryHtmlRoot(StorageOptions options)
-    {
-        if (!string.IsNullOrWhiteSpace(options.HtmlRoot))
-            return Path.IsPathRooted(options.HtmlRoot)
-                ? options.HtmlRoot
-                : AppBuilder.ResolveDatabasePath(options.HtmlRoot);
-        return AppBuilder.ResolveDatabasePath("html-payloads-memory");
     }
 }
 

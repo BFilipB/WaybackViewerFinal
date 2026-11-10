@@ -26,6 +26,7 @@ public sealed class AppHost : IAsyncDisposable
         var config = new Dictionary<string, string?>
         {
             ["Storage:Provider"] = "Memory",
+            ["Storage:HtmlRoot"] = "", // do not inherit the developer's persistent payload directory
             ["Preload:Workers"] = "3",
             ["Preload:WriteMaxDelayMs"] = "20",
             ["Logging:LogLevel:Default"] = "Warning",

@@ -19,10 +19,15 @@ dotnet build $project -c Release --nologo -v q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 
 $env:Storage__Provider = 'Memory'
+$runDirectory = Join-Path ([IO.Path]::GetTempPath()) ('WaybackViewer-smoke-' + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $runDirectory | Out-Null
+$env:Storage__HtmlRoot = Join-Path $runDirectory 'html-payloads'
 $env:ASPNETCORE_ENVIRONMENT = 'Production'
 $env:Logging__LogLevel__Default = 'Warning'
-$env:Logging__File__Directory = Join-Path ([IO.Path]::GetTempPath()) 'WaybackViewer-smoke-logs'
-$proc = Start-Process dotnet -ArgumentList @('run', '--project', $project, '-c', 'Release', '--no-build', '--urls', $base) -PassThru -WindowStyle Hidden
+$env:Logging__File__Directory = Join-Path $runDirectory 'logs'
+$stdout = Join-Path $runDirectory 'stdout.log'
+$stderr = Join-Path $runDirectory 'stderr.log'
+$proc = Start-Process dotnet -ArgumentList @('run', '--project', "`"$project`"", '-c', 'Release', '--no-build', '--no-launch-profile', '--urls', $base) -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
 
 $failed = $false
 $client = New-Object System.Net.Http.HttpClient
@@ -55,9 +60,20 @@ function Report([string]$Name, $Batch, [int[]]$OkStatus) {
 try {
 	$ready = $false
 	for ($i = 0; $i -lt 60 -and -not $ready; $i++) {
-		try { $ready = ($client.GetAsync("$base/healthz").GetAwaiter().GetResult().StatusCode -eq 'OK') } catch { Start-Sleep -Milliseconds 500 }
+		if ($proc.HasExited) { break }
+		try {
+			$response = $client.GetAsync("$base/healthz").GetAwaiter().GetResult()
+			$ready = ($response.StatusCode -eq 'OK')
+			$response.Dispose()
+		} catch { Write-Verbose "Health check failed: $_" }
+		if (-not $ready) { Start-Sleep -Milliseconds 500 }
 	}
-	if (-not $ready) { throw 'App did not become healthy' }
+	if (-not $ready) {
+		foreach ($log in @($stdout, $stderr)) {
+			if (Test-Path $log) { Get-Content $log -Tail 100 | Write-Host }
+		}
+		throw "App did not become healthy. Startup logs: $runDirectory"
+	}
 	Write-Host "App healthy at $base"
 
 	# Smoke

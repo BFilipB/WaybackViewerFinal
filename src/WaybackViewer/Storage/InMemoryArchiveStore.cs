@@ -5,7 +5,7 @@ namespace WaybackViewer.Storage;
 /// Volatile store: used by the tests and for "Storage:Provider": "Memory". Mirrors SqlArchiveStore semantics.
 public sealed partial class InMemoryArchiveStore : IArchiveStore
 {
-    private readonly HtmlFileStore htmlFiles;
+    private readonly HtmlFileStore? htmlFiles;
     private readonly object gate = new();
     private long nextCaptureId = 1;
     private long nextSearchId = 1;
@@ -23,7 +23,8 @@ public sealed partial class InMemoryArchiveStore : IArchiveStore
     public IReadOnlyList<int> SaveBatchSizes { get { lock (gate) return saveBatchSizes.ToArray(); } }
     public int PageCount { get { lock (gate) return pages.Count; } }
 
-    public InMemoryArchiveStore() : this(new HtmlFileStore(AppBuilder.ResolveDatabasePath("html-payloads-memory"))) { }
+    // Volatile stores must not depend on the persistent data drive or share payload files across instances.
+    public InMemoryArchiveStore() { }
 
     public InMemoryArchiveStore(HtmlFileStore htmlFiles) => this.htmlFiles = htmlFiles;
 
@@ -96,17 +97,21 @@ public sealed partial class InMemoryArchiveStore : IArchiveStore
         }
     }
 
-    public Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default)
+    public async Task<StoredPage?> GetPageAsync(string timestamp, string original, bool includeHtml, CancellationToken ct = default)
     {
+        ct.ThrowIfCancellationRequested();
+        StoredPage page;
         lock (gate)
         {
-            if (!captureIds.TryGetValue(Key(timestamp, original), out var id) || !pages.TryGetValue(id, out var page))
-                return Task.FromResult<StoredPage?>(null);
-            if (!includeHtml) return Task.FromResult<StoredPage?>(page with { HtmlGz = null });
-
-            var html = page.HtmlGz ?? htmlFiles.LoadAsync(page.Capture, ct).GetAwaiter().GetResult();
-            return Task.FromResult<StoredPage?>(page with { HtmlGz = html });
+            if (!captureIds.TryGetValue(Key(timestamp, original), out var id) || !pages.TryGetValue(id, out var stored))
+                return null;
+            page = stored;
         }
+        if (!includeHtml) return page with { HtmlGz = null };
+        var html = page.HtmlGz;
+        if (html is null && htmlFiles is not null)
+            html = await htmlFiles.LoadAsync(page.Capture, ct).ConfigureAwait(false);
+        return page with { HtmlGz = html };
     }
 
     public Task<IReadOnlyList<long>> MatchCaptureIdsAsync(string query, CancellationToken ct = default)
@@ -128,21 +133,23 @@ public sealed partial class InMemoryArchiveStore : IArchiveStore
         }
     }
 
-    public Task SavePagesAsync(IReadOnlyList<NewPage> newPages, CancellationToken ct = default)
+    public async Task SavePagesAsync(IReadOnlyList<NewPage> newPages, CancellationToken ct = default)
     {
-        lock (gate)
+        ct.ThrowIfCancellationRequested();
+        lock (gate) saveBatchSizes.Add(newPages.Count);
+        foreach (var p in newPages)
         {
-            saveBatchSizes.Add(newPages.Count);
-            foreach (var p in newPages)
+            ct.ThrowIfCancellationRequested();
+            if (htmlFiles is not null)
+                await htmlFiles.SaveAsync(p.Capture, p.HtmlGz, ct).ConfigureAwait(false);
+            lock (gate)
             {
                 var id = EnsureCapture(p.Capture);
                 var searchText = SearchTextMatcher.BuildIndexText(p.Capture.Original, p.Parsed.Title, p.Parsed.Description, p.Parsed.Text);
                 captureSearchText[id] = searchText;
-                htmlFiles.SaveAsync(p.Capture, p.HtmlGz, ct).GetAwaiter().GetResult();
                 pages[id] = new StoredPage(captures[id], p.HtmlGz, p.Parsed, p.FetchedAt);
             }
         }
-        return Task.CompletedTask;
     }
 
     public Task SaveOutcomesAsync(IReadOnlyList<CaptureOutcome> list, CancellationToken ct = default)

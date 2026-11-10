@@ -148,8 +148,17 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
     public ILogger? Log { get; set; }
 
     public SqliteArchiveStore(string connectionString)
-        : this(connectionString, new HtmlFileStore(AppBuilder.ResolveDatabasePath("html-payloads")))
+        : this(connectionString, new HtmlFileStore(DefaultHtmlRoot(connectionString)))
     {
+    }
+
+    private static string DefaultHtmlRoot(string connectionString)
+    {
+        var dataSource = new SqliteConnectionStringBuilder(connectionString).DataSource;
+        // An explicitly located database must not acquire a hidden dependency on the default data drive.
+        if (Path.IsPathRooted(dataSource))
+            return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(dataSource))!, "html-payloads");
+        return AppBuilder.ResolveDatabasePath("html-payloads");
     }
 
     public SqliteArchiveStore(string connectionString, HtmlFileStore htmlFiles)

@@ -62,6 +62,9 @@ public class PreloadContentionTests
     public async Task Heavy_status_polling_does_not_stall_workers_or_skew_accounting()
     {
         var loader = new FakePageLoader();
+        // Status counters describe the current batch, not lifetime totals. Keep all submissions in one batch.
+        var releaseLoads = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        loader.Hook = _ => releaseLoads.Task;
         using var coordinator = Make(loader);
         using var stop = new CancellationTokenSource();
         var polls = 0;
@@ -72,6 +75,7 @@ public class PreloadContentionTests
 
         var sites = Enumerable.Range(0, 10).Select(i => $"p{i}.com").ToArray();
         await Task.WhenAll(sites.Select(s => Task.Run(() => coordinator.EnqueueAsync(Job(s, 200), s + "/", "html200"))));
+        releaseLoads.SetResult();
         await coordinator.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(60));
         stop.Cancel();
         await Task.WhenAll(pollers);
