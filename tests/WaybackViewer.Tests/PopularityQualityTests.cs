@@ -1,5 +1,6 @@
 using WaybackViewer.Models;
 using WaybackViewer.Parsing;
+using WaybackViewer.Storage;
 
 namespace WaybackViewer.Tests;
 
@@ -89,4 +90,58 @@ public class PopularityQualityTests
         Assert.True(Score("https://forum.example/thread/0") > Score("https://forum.example/thread/5"));
         Assert.True(Score("https://forum.example/about") >= Score("https://forum.example/thread/5"));
     }
-}
+
+    [Fact]
+    public async Task Single_metric_sort_puts_unknown_last_and_least_is_not_the_same_as_most()
+    {
+        // S7: unknown views were treated as 0, so "least viewed" listed unknown pages first (and tied rows looked identical to "most viewed").
+        var dir = Path.Combine(Path.GetTempPath(), "wbv-s7-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var store = new SqliteArchiveStore($"Data Source={Path.Combine(dir, "d.db")}", new HtmlFileStore(Path.Combine(dir, "html")));
+        await store.InitializeAsync();
+        await store.SaveSearchAsync("a.com/", "all", SampleData.Captures(8), DateTimeOffset.UtcNow);
+        var all = (await store.GetSearchAsync("a.com/", "all"))!.Captures;
+
+        NewPage Save(StoredCapture c, PageMetadata m) =>
+            new(c.Capture, HtmlCodec.Compress("<html><body>x</body></html>"), new ParsedPage(null, null, "x", m), DateTimeOffset.UtcNow);
+        var v500 = all[0]; var v50 = all[1]; var v0 = all[2]; var noViews1 = all[3]; var noViews2 = all[4];
+        await store.SavePagesAsync([
+            Save(v500, new PageMetadata(Views: 500, EngagementScore: 500, Confidence: 0.6)),
+            Save(v50, new PageMetadata(Views: 50, EngagementScore: 50, Confidence: 0.6)),
+            Save(v0, new PageMetadata(Views: 0, EngagementScore: 0, Confidence: 0.6)),
+            Save(noViews1, new PageMetadata(Comments: 9, EngagementScore: 36, Confidence: 0.6)),
+            Save(noViews2, new PageMetadata(Likes: 3, EngagementScore: 9, Confidence: 0.6))]);
+
+        var most = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 100, null, new PopularityQuery("viewed", "none", 0));
+        var least = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 100, null, new PopularityQuery("least-viewed", "none", 0));
+
+        Assert.Equal([v500.Id, v50.Id, v0.Id], most!.Captures.Select(c => c.Id).Take(3));
+        Assert.Equal([v0.Id, v50.Id, v500.Id], least!.Captures.Select(c => c.Id).Take(3));
+    }
+    [Fact]
+    public async Task Views_sort_ranks_rows_without_views_by_an_estimated_proxy_after_real_views()
+    {
+        // Reddit-like sites have no view counts: rows with comments/likes form a middle level ordered by engagement, rows with nothing come last.
+        var dir = Path.Combine(Path.GetTempPath(), "wbv-s8-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        var store = new SqliteArchiveStore($"Data Source={Path.Combine(dir, "d.db")}", new HtmlFileStore(Path.Combine(dir, "html")));
+        await store.InitializeAsync();
+        await store.SaveSearchAsync("a.com/", "all", SampleData.Captures(8), DateTimeOffset.UtcNow);
+        var all = (await store.GetSearchAsync("a.com/", "all"))!.Captures;
+
+        NewPage Save(StoredCapture c, PageMetadata m) =>
+            new(c.Capture, HtmlCodec.Compress("<html><body>x</body></html>"), new ParsedPage(null, null, "x", m), DateTimeOffset.UtcNow);
+        var v500 = all[0]; var v50 = all[1]; var c40 = all[2]; var c2 = all[3]; var none = all[4];
+        await store.SavePagesAsync([
+            Save(v500, new PageMetadata(Views: 500, EngagementScore: 500, Confidence: 0.6)),
+            Save(v50, new PageMetadata(Views: 50, EngagementScore: 50, Confidence: 0.6)),
+            Save(c40, new PageMetadata(Comments: 40, EngagementScore: 160, Confidence: 0.6)),
+            Save(c2, new PageMetadata(Comments: 2, EngagementScore: 8, Confidence: 0.6)),
+            Save(none, new PageMetadata(EngagementScore: 120, Confidence: 0.2))]);
+
+        var most = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 100, null, new PopularityQuery("viewed", "none", 0));
+        var least = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 100, null, new PopularityQuery("least-viewed", "none", 0));
+
+        Assert.Equal([v500.Id, v50.Id, c40.Id, c2.Id, none.Id], most!.Captures.Select(c => c.Id).Take(5));
+        Assert.Equal([v50.Id, v500.Id, c2.Id, c40.Id, none.Id], least!.Captures.Select(c => c.Id).Take(5));
+    }}

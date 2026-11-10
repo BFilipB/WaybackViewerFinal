@@ -323,6 +323,7 @@ else if (Model.CachedAt is not null)
           @if (pm.Shares is { } sh) { <span title="Shares">&#128257; @(pm.Tier < 2 ? "~" : "")@sh</span> }
           @if (pm.Score is { } sc) { <span title="Score">&#11088; @(pm.Tier < 2 ? "~" : "")@sc</span> }
           @if (pm.Views is null && pm.Likes is null && pm.Comments is null && pm.Shares is null && pm.Score is null && pm.EffectiveEngagementScore > 0) { <span title="No counts found on this page: rough estimate from how often it was archived and how much sits beneath it, relative to its own site">&asymp; est. @pm.EffectiveEngagementScore</span> }
+          @if (pm.Views is null && (Model.SortMode is "viewed" or "least-viewed") && (pm.Likes is not null || pm.Comments is not null || pm.Shares is not null || pm.Score is not null)) { <span title="No view count on this site: views are ranked by an estimate from comments, likes and score">&#128065; ~@pm.EffectiveEngagementScore</span> }
         </div>
       }
       <div class="row">

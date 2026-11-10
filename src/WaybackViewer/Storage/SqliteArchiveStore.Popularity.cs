@@ -239,6 +239,20 @@ tx.Commit();
         }
     }
 
+    /// 1 when the sorted single metric (views/likes/comments/score) is known for the row. Unknown is not zero (S7): such rows
+    /// rank after every row that has the value, for both most and least. Combined metrics always count as known.
+    private static string HasMetricSql(string metric) => metric switch
+    {
+        "views" or "viewed" => "CASE WHEN HasM AND mV IS NOT NULL THEN 2 WHEN HasM AND (mL IS NOT NULL OR mC IS NOT NULL OR mS IS NOT NULL OR mSh IS NOT NULL) THEN 1 ELSE 0 END",
+        "likes" or "liked" => "(HasM AND mL IS NOT NULL)",
+        "comments" or "commented" => "(HasM AND mC IS NOT NULL)",
+        "score" => "(HasM AND mS IS NOT NULL)",
+        _ => "1"
+    };
+
+    /// Views sort value: real views when known; otherwise the engagement score as an estimated proxy (tier Hv = 1, never mixed with real views).
+    private const string ViewsSortSql = "CASE WHEN HasM THEN CASE WHEN mV IS NOT NULL THEN mV ELSE " + EffectiveEngagement + " END ELSE 0 END";
+
     private static string MetricSql(string metric, bool hasMetadata) => hasMetadata
         ? metric switch
         {
@@ -259,7 +273,10 @@ tx.Commit();
     private static string PopularityCtes(PopularityQuery p)
     {
         var pm = p.Metric == "none" ? "0" : $"CASE WHEN HasM THEN {MetricSql(p.Metric, true)} ELSE {MetricSql(p.Metric, false)} END";
-        var ps = p.Sort is "newest" or "published" ? "0" : $"CASE WHEN HasM THEN {MetricSql(p.SortMetric, true)} ELSE {MetricSql(p.SortMetric, false)} END";
+        var ps = p.Sort is "newest" or "published" ? "0" : p.SortMetric is "views" or "viewed" ? ViewsSortSql : $"CASE WHEN HasM THEN {MetricSql(p.SortMetric, true)} ELSE {MetricSql(p.SortMetric, false)} END";
+        
+
+var hv = p.Sort is "newest" or "published" ? "1" : HasMetricSql(p.SortMetric);
         return $"""
             , base AS (SELECT sg.CaptureId, sg.Host, sg.Raw FROM CaptureSignals sg
                 JOIN SearchCaptures sc ON sc.SearchId = sg.SearchId AND sc.CaptureId = sg.CaptureId
@@ -280,8 +297,9 @@ tx.Commit();
                 LEFT JOIN CaptureSignals sg ON sg.SearchId = $id AND sg.CaptureId = v.Id
                 LEFT JOIN cum ON cum.Host = sg.Host AND cum.Raw = sg.Raw),
             pm0 AS (SELECT mm.*, {pm} AS Pm, {ps} AS Ps, ({ps}) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Wk,
-                CASE WHEN HasM = 0 THEN 0 WHEN mConf >= 0.5 THEN 2 WHEN mConf >= 0.15 THEN 1 ELSE 0 END AS Tr FROM mm),
-            pm AS (SELECT pm0.*, CUME_DIST() OVER (PARTITION BY Tr ORDER BY Ps) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Pk FROM pm0)
+                CASE WHEN HasM = 0 THEN 0 WHEN mConf >= 0.5 THEN 2 WHEN mConf >= 0.15 THEN 1 ELSE 0 END AS Tr,
+                {hv} AS Hv FROM mm),
+            pm AS (SELECT pm0.*, CUME_DIST() OVER (PARTITION BY Hv, Tr ORDER BY Ps) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Pk FROM pm0)
             """;
     }
 
@@ -310,7 +328,7 @@ tx.Commit();
             cte += PopularityCtes(pop);
             from = "pm";
             if (pop.Sort == "published") order = "CASE WHEN mPub IS NULL THEN 1 ELSE 0 END, mPub DESC, CaptureTs DESC, Id DESC";
-        else if (pop.Sort != "newest") order = pop.Least ? "Tr DESC, Pk ASC, Wk ASC, CaptureTs DESC, Id DESC" : "Tr DESC, Pk DESC, Wk DESC, CaptureTs DESC, Id DESC";   // measured > estimated > archive signal
+        else if (pop.Sort != "newest") order = pop.Least ? "Hv DESC, Tr DESC, Pk ASC, Wk ASC, CaptureTs DESC, Id DESC" : "Hv DESC, Tr DESC, Pk DESC, Wk DESC, CaptureTs DESC, Id DESC";   // measured > estimated > archive signal
             if (pop.Metric != "none" && (pop.Threshold > 0 || pop.MaxThreshold > 0))
             {
                 kept = $" WHERE Pm >= $thr AND Tr >= {pop.MinTier}" + (pop.MaxThreshold > 0 ? " AND Pm <= $maxthr" : "");

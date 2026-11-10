@@ -289,6 +289,20 @@ internal static class FilteredQueries
     private const string EffectiveEngagement =
         "COALESCE(mE, COALESCE(mS,0) + COALESCE(mV,0) + COALESCE(mL,0)*3 + COALESCE(mC,0)*4 + COALESCE(mSh,0)*2)";
 
+    /// 1 when the sorted single metric (views/likes/comments/score) is known for the row. Unknown is not zero (S7): such rows
+    /// rank after every row that has the value, for both most and least. Combined metrics always count as known.
+    private static string HasMetricSql(string metric) => metric switch
+    {
+        "views" or "viewed" => "CASE WHEN HasM = 1 AND mV IS NOT NULL THEN 2 WHEN HasM = 1 AND (mL IS NOT NULL OR mC IS NOT NULL OR mS IS NOT NULL OR mSh IS NOT NULL) THEN 1 ELSE 0 END",
+        "likes" or "liked" => "CASE WHEN HasM = 1 AND mL IS NOT NULL THEN 1 ELSE 0 END",
+        "comments" or "commented" => "CASE WHEN HasM = 1 AND mC IS NOT NULL THEN 1 ELSE 0 END",
+        "score" => "CASE WHEN HasM = 1 AND mS IS NOT NULL THEN 1 ELSE 0 END",
+        _ => "1"
+    };
+
+    /// Views sort value: real views when known; otherwise the engagement score as an estimated proxy (tier Hv = 1, never mixed with real views).
+    private const string ViewsSortSql = "CASE WHEN HasM = 1 THEN CASE WHEN mV IS NOT NULL THEN mV ELSE " + EffectiveEngagement + " END ELSE 0 END";
+
     private static string MetricSql(SqlDialect d, string metric, bool hasMetadata) => hasMetadata
         ? metric switch
         {
@@ -310,7 +324,8 @@ internal static class FilteredQueries
     private static string PopularityCtes(SqlDialect d, PopularityQuery p)
     {
         var pm = p.Metric == "none" ? "0" : $"CASE WHEN HasM = 1 THEN {MetricSql(d, p.Metric, true)} ELSE {MetricSql(d, p.Metric, false)} END";
-        var ps = p.Sort is "newest" or "published" ? "0" : $"CASE WHEN HasM = 1 THEN {MetricSql(d, p.SortMetric, true)} ELSE {MetricSql(d, p.SortMetric, false)} END";
+        var ps = p.Sort is "newest" or "published" ? "0" : p.SortMetric is "views" or "viewed" ? ViewsSortSql : $"CASE WHEN HasM = 1 THEN {MetricSql(d, p.SortMetric, true)} ELSE {MetricSql(d, p.SortMetric, false)} END";
+        var hv = p.Sort is "newest" or "published" ? "1" : HasMetricSql(p.SortMetric);
         var score = d.TruncToInt($"99.0 * ((cum.lo + cum.hi) / 2.0) / {d.Greatest("cum.n", "1")}");
         return $"""
             , bs AS (SELECT sg.CaptureId, sg.Host, sg.Raw FROM CaptureSignals sg
@@ -330,8 +345,9 @@ internal static class FilteredQueries
                 LEFT JOIN CaptureSignals sg ON sg.SearchId = @id AND sg.CaptureId = v.Id
                 LEFT JOIN cum ON cum.Host = sg.Host AND cum.Raw = sg.Raw),
             pm0 AS (SELECT mm.*, {pm} AS Pm, {ps} AS Ps, ({ps}) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Wk,
-                CASE WHEN HasM = 0 THEN 0 WHEN mConf >= 0.5 THEN 2 WHEN mConf >= 0.15 THEN 1 ELSE 0 END AS Tr FROM mm),
-            pm AS (SELECT pm0.*, CUME_DIST() OVER (PARTITION BY Tr ORDER BY Ps) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Pk FROM pm0)
+                CASE WHEN HasM = 0 THEN 0 WHEN mConf >= 0.5 THEN 2 WHEN mConf >= 0.15 THEN 1 ELSE 0 END AS Tr,
+                {hv} AS Hv FROM mm),
+            pm AS (SELECT pm0.*, CUME_DIST() OVER (PARTITION BY Hv, Tr ORDER BY Ps) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Pk FROM pm0)
             """;
     }
 
@@ -352,7 +368,7 @@ internal static class FilteredQueries
             cte += PopularityCtes(d, pop);
             from = "pm";
             if (pop.Sort == "published") order = "CASE WHEN mPub IS NULL THEN 1 ELSE 0 END, mPub DESC, CaptureTs DESC, Id DESC";
-            else if (pop.Sort != "newest") order = pop.Least ? "Tr DESC, Pk ASC, Wk ASC, CaptureTs DESC, Id DESC" : "Tr DESC, Pk DESC, Wk DESC, CaptureTs DESC, Id DESC";   // measured > estimated > archive signal
+            else if (pop.Sort != "newest") order = pop.Least ? "Hv DESC, Tr DESC, Pk ASC, Wk ASC, CaptureTs DESC, Id DESC" : "Hv DESC, Tr DESC, Pk DESC, Wk DESC, CaptureTs DESC, Id DESC";   // measured > estimated > archive signal
             if (pop.Metric != "none" && (pop.Threshold > 0 || pop.MaxThreshold > 0))
             {
                 kept = $" WHERE Pm >= @thr AND Tr >= {pop.MinTier}" + (pop.MaxThreshold > 0 ? " AND Pm <= @max" : "");

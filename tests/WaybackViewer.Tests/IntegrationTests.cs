@@ -529,6 +529,18 @@ public class HomePageTests
     }
 
     [Fact]
+    public async Task Viewed_sort_marks_rows_without_views_with_an_estimated_tilde_badge()
+    {
+        // The fixture has likes but no views (reddit-like): views sort uses an estimate and must label it with ~.
+        var (host, _) = await PopularityHostAsync();
+        await using var _h = host;
+        var viewed = await host.GetAsync("/?url=example.com/&sort=viewed");
+        var liked = await host.GetAsync("/?url=example.com/&sort=liked");
+        Assert.Contains("views are ranked by an estimate", viewed);
+        Assert.DoesNotContain("views are ranked by an estimate", liked);
+    }
+
+    [Fact]
     public async Task Popularity_filter_with_no_matches_explains_itself()
     {
         var (host, _) = await PopularityHostAsync();

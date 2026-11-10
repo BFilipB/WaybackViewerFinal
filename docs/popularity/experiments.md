@@ -85,3 +85,13 @@
 - Sort key: CUME_DIST of the sort metric within the tier (SQLite, generic SQL, in-memory), times 0.5+0.5*confidence; raw weighted value breaks ties. Scope = rows of the current view (a search prefix = a site).
 - Snapshot before/after identical (PopularitySnapshotTests unchanged and passing). PercentileNormalizationTests: 1000 comments @0.5 conf now ranks below 10 comments @1.0.
 - Filters, thresholds and presets still use raw values.
+
+## S7: unknown metric sorted as zero (most/least viewed looked identical)
+- Single-metric sorts (views/likes/comments/score) treated a missing metric as 0, so most/least viewed tied across unknown rows and fell to the same CaptureTs tiebreak; least-* listed unknown rows first.
+- Fix: rows lacking the sorted metric rank after rows that have it (explicit 0 counts as known), for most and least, in SQLite, generic SQL and in-memory paths. Percentile partition is now (known, tier). No stored metadata changed, ExtractorVersion unchanged.
+- Snapshot (engaged ranking) unchanged and passing; test: PopularityQualityTests.Single_metric_sort_puts_unknown_last_and_least_is_not_the_same_as_most.
+
+## S8: views sort on sites without view counts (reddit)
+- Reddit exposes no views (extract.summary views=0), so S7 left every row tied. Views sort now has levels: real views (2) > estimated proxy from engagement of rows with other counts (1) > no counts (0). Proxy never mixes with real views; thresholds/filters still use real values only. SQLite, generic SQL and in-memory paths.
+- Test: PopularityQualityTests.Views_sort_ranks_rows_without_views_by_an_estimated_proxy_after_real_views. Engaged snapshot unchanged. ExtractorVersion unchanged.
+- Open: show a leading ~ on proxy-ranked rows in the UI.

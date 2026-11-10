@@ -321,15 +321,35 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         var least = sortMode.StartsWith("least-", StringComparison.Ordinal);
         var sortMetric = least ? sortMode["least-".Length..] : sortMode;
         int TierOf(StoredCapture c) => metadata.TryGetValue(c.Capture.Key, out var tm) ? tm.Tier : 0;
-        var pct = Percentiles(items, TierOf, c => GetPopularityMetric(metadata, c, sortMetric));
+        var pct = Percentiles(items, c => SortLevel(metadata, c, sortMetric) * 10 + TierOf(c), c => SortValue(metadata, c, sortMetric));
         double Pk(StoredCapture c) => pct[c.Id] * (metadata.TryGetValue(c.Capture.Key, out var m) ? 0.5 + 0.5 * m.Confidence : 1.0);
-        var tiered = items.OrderByDescending(TierOf);
+        var tiered = items.OrderByDescending(c => SortLevel(metadata, c, sortMetric)).ThenByDescending(TierOf);
         return (least ? tiered.ThenBy(Pk).ThenBy(c => WeightedKey(metadata, c, sortMetric)) : tiered.ThenByDescending(Pk).ThenByDescending(c => WeightedKey(metadata, c, sortMetric)))
             .ThenByDescending(c => c.Capture.Timestamp, StringComparer.Ordinal)
             .ThenByDescending(c => c.Id)
             .ToList();
     }
 
+    /// Unknown is not zero (S7): single-metric sorts rank rows lacking that metric after every row that has it, for most and least.
+    /// Views have no real count on many sites (reddit): rows with other counts form a middle level ranked by an estimated proxy.
+    private static int SortLevel(IReadOnlyDictionary<string, PageMetadata> metadata, StoredCapture c, string metric)
+    {
+        if (!metadata.TryGetValue(c.Capture.Key, out var m)) return metric is "views" or "viewed" or "likes" or "liked" or "comments" or "commented" or "score" ? 0 : 1;
+        return metric switch
+        {
+            "views" or "viewed" => m.Views.HasValue ? 2 : m.Likes.HasValue || m.Comments.HasValue || m.Score.HasValue || m.Shares.HasValue ? 1 : 0,
+            "likes" or "liked" => m.Likes.HasValue ? 1 : 0,
+            "comments" or "commented" => m.Comments.HasValue ? 1 : 0,
+            "score" => m.Score.HasValue ? 1 : 0,
+            _ => 1
+        };
+    }
+
+    /// Value ranked by a sort: the metric itself, except views without a real count use the engagement score as an estimated proxy.
+    private static long SortValue(IReadOnlyDictionary<string, PageMetadata> metadata, StoredCapture c, string metric) =>
+        metric is "views" or "viewed" && metadata.TryGetValue(c.Capture.Key, out var m) && !m.Views.HasValue
+            ? m.EffectiveEngagementScore
+            : GetPopularityMetric(metadata, c, metric);
     /// Within-tier percentile (SQL CUME_DIST: share of rows with a value <= this one), per capture id.
     private static Dictionary<long, double> Percentiles(IEnumerable<StoredCapture> items, Func<StoredCapture, int> tier, Func<StoredCapture, long> value)
     {
@@ -350,7 +370,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
 
     /// Sort key inside a tier: metric * (0.5 + 0.5 * confidence), so equally popular pages rank by how sure the extraction is.
     private static double WeightedKey(IReadOnlyDictionary<string, PageMetadata> metadata, StoredCapture c, string metric) =>
-        GetPopularityMetric(metadata, c, metric) * (metadata.TryGetValue(c.Capture.Key, out var m) ? 0.5 + 0.5 * m.Confidence : 1.0);
+        SortValue(metadata, c, metric) * (metadata.TryGetValue(c.Capture.Key, out var m) ? 0.5 + 0.5 * m.Confidence : 1.0);
 
     /// Exact filters count measured pages only; estimates and archive-signal rows join when requested.
     private static bool Eligible(IReadOnlyDictionary<string, PageMetadata> metadata, StoredCapture capture, bool includeEstimates) =>
