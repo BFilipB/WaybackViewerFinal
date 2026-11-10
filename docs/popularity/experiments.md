@@ -95,3 +95,7 @@
 - Reddit exposes no views (extract.summary views=0), so S7 left every row tied. Views sort now has levels: real views (2) > estimated proxy from engagement of rows with other counts (1) > no counts (0). Proxy never mixes with real views; thresholds/filters still use real values only. SQLite, generic SQL and in-memory paths.
 - Test: PopularityQualityTests.Views_sort_ranks_rows_without_views_by_an_estimated_proxy_after_real_views. Engaged snapshot unchanged. ExtractorVersion unchanged.
 - Open: show a leading ~ on proxy-ranked rows in the UI.
+
+## S8 UI and documentation follow-up
+- The Home view now labels proxy-ranked rows with an eye/~ engagement-score badge under viewed and least-viewed sorts. The tooltip explains the fallback; real view counts and other sorts remain unchanged. IntegrationTests.Viewed_sort_marks_rows_without_views_with_an_estimated_tilde_badge covers the rendering distinction.
+- The root README explains the three sort levels, confidence weighting, and why ~N is a ranking proxy rather than a predicted visitor count. Views filters still use the real field; the fallback does not populate it. No scoring, snapshot, stored metadata or ExtractorVersion changes in this documentation follow-up.

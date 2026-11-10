@@ -44,4 +44,4 @@
 
 - [x] Coverage line (CoverageTests green; 558 non-browser tests pass, 2 Postgres skipped)
 - [x] S7 single-metric sorts rank unknown metric last (most/least viewed no longer identical)
-- [x] S8 views sort uses an estimated engagement proxy when a site has no view counts (UI ~ label still open)
+- [x] S8 views sort uses an estimated engagement proxy when a site has no view counts, with a UI ~ label and explanatory tooltip
