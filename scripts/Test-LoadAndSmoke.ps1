@@ -21,6 +21,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 $env:Storage__Provider = 'Memory'
 $env:ASPNETCORE_ENVIRONMENT = 'Production'
 $env:Logging__LogLevel__Default = 'Warning'
+$env:Logging__File__Directory = Join-Path ([IO.Path]::GetTempPath()) 'WaybackViewer-smoke-logs'
 $proc = Start-Process dotnet -ArgumentList @('run', '--project', $project, '-c', 'Release', '--no-build', '--urls', $base) -PassThru -WindowStyle Hidden
 
 $failed = $false

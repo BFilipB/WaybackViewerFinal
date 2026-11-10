@@ -26,6 +26,8 @@ jobs:
           --health-retries 10
     env:
       WAYBACK_TEST_POSTGRES: Host=localhost;Port=5432;Database=wayback_test;Username=wayback;Password=wayback;Maximum Pool Size=30
+      Logging__File__Directory: ${{ github.workspace }}/TestResults/logs
+      Logging__File__MinLevel: Information
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4

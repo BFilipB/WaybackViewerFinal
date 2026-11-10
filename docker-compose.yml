@@ -9,6 +9,7 @@ services:
       Storage__Provider: Sqlite
       ConnectionStrings__WaybackDb: Data Source=/data/wayback.db
       Storage__HtmlRoot: /data/html-payloads
+      Logging__File__Directory: /data/logs
     volumes:
       - wayback-data:/data
     restart: unless-stopped

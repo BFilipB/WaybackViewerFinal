@@ -13,7 +13,8 @@ COPY --from=build /app ./
 # Everything the app writes (SQLite file + compressed HTML payloads) lives in /data: mount a volume there.
 ENV ASPNETCORE_URLS=http://+:8080 \
 	ConnectionStrings__WaybackDb="Data Source=/data/wayback.db" \
-	Storage__HtmlRoot=/data/html-payloads
+	Storage__HtmlRoot=/data/html-payloads \
+	Logging__File__Directory=/data/logs
 RUN mkdir -p /data && chown -R $APP_UID /data
 VOLUME /data
 EXPOSE 8080
