@@ -10,6 +10,13 @@
   <img alt="Platform" src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-2b6cb0.svg" />
 </p>
 
+## Demo
+
+<video width="100%" style="max-width: 640px; border-radius: 8px;" controls>
+  <source src="https://github.com/BFilipB/WaybackViewerFinal/releases/download/v1.0.0/demo.mp4" type="video/mp4">
+  Your browser does not support the HTML5 video tag.
+</video>
+
 Wayback Viewer is a .NET 8 web app for loading website capture lists from the Internet Archive, browsing captures quickly,
 and persisting metadata + archived payloads for fast local replay.
 
