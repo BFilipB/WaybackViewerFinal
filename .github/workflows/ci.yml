@@ -31,6 +31,10 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 8.0.x
+      - name: Configure test environment
+        run: |
+          echo "WAYBACKVIEWER_DATA_ROOT=$RUNNER_TEMP/waybackviewer-data" >> "$GITHUB_ENV"
+          echo "DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false" >> "$GITHUB_ENV"
       - run: dotnet build --nologo -c Release
       - name: Install Chromium for browser tests
         run: pwsh tests/WaybackViewer.Tests/bin/Release/net8.0/playwright.ps1 install --with-deps chromium
