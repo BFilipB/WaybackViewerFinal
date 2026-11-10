@@ -78,6 +78,18 @@ public class ArchiveClientTests
     }
 
     [Fact]
+    public async Task Recovers_to_the_minimum_interval_within_twenty_successes()
+    {
+        var (client, handler, _) = Create();
+        handler.Enqueue(HttpStatusCode.TooManyRequests);
+        handler.Enqueue(HttpStatusCode.OK);
+        await client.GetStringAsync("https://x/0");
+
+        for (var i = 1; i <= 20; i++) await client.GetStringAsync("https://x/" + i);
+
+        Assert.Equal(TimeSpan.FromMilliseconds(300), client.CurrentInterval);
+    }
+    [Fact]
     public async Task Gives_up_after_max_attempts()
     {
         var (client, handler, _) = Create(maxAttempts: 3);

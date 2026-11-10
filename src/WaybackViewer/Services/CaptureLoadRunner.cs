@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Options;
 using WaybackViewer.Models;
 using WaybackViewer.Storage;
 
@@ -12,13 +13,17 @@ public sealed class CaptureLoadRunner : IHostedService
     private readonly PreloadCoordinator preload;
     private readonly IArchiveStore store;
     private readonly ILogger<CaptureLoadRunner> log;
+    private readonly ITimeSource? time;
+    private readonly ArchiveOptions archiveOptions;
     private readonly CancellationTokenSource stopping = new();
     private readonly object gate = new();
     private readonly List<Task> running = new();
 
     public CaptureLoadRunner(CaptureCatalog catalog, PreloadCoordinator preload, IArchiveStore store,
-        ILogger<CaptureLoadRunner> log)
+        ILogger<CaptureLoadRunner> log, ITimeSource? time = null, IOptions<ArchiveOptions>? archiveOptions = null)
     {
+        this.time = time;
+        this.archiveOptions = archiveOptions?.Value ?? new ArchiveOptions();
         this.catalog = catalog;
         this.preload = preload;
         this.store = store;
@@ -73,9 +78,21 @@ public sealed class CaptureLoadRunner : IHostedService
             ["filter"] = filter,
             ["refresh"] = refresh
         });
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        log.LogInformation("captureload.start");
         try
         {
-            var result = await catalog.GetAsync(prefix, filter, refresh, stopping.Token).ConfigureAwait(false);
+            var result = await GetWithRetryAsync(prefix, filter, refresh).ConfigureAwait(false);
+            log.LogInformation("captureload.done rows={Rows} fromDatabase={FromDb} ms={Ms:F0}", result.Snapshot.Captures.Count, result.FromDatabase,
+                System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+            if (!result.FromDatabase && result.Snapshot.Captures.Count > 0)
+            {
+                // URL kind distribution of a freshly loaded list: a large "page" share means the classifier lacks rules for this site.
+                var kinds = result.Snapshot.Captures.GroupBy(c => WaybackViewer.Parsing.UrlClassifier.Classify(c.Capture.Original).Kind)
+                    .OrderByDescending(g => g.Count()).Select(g => g.Key + ":" + g.Count());
+                var uniqueUrls = result.Snapshot.Captures.Select(c => c.Capture.Original).Distinct(StringComparer.Ordinal).Count();
+                log.LogInformation("classify.summary rows={Rows} uniqueUrls={Unique} kinds={Kinds}", result.Snapshot.Captures.Count, uniqueUrls, string.Join(',', kinds));
+            }
             if (result.FromDatabase) await FinishCachedAsync(prefix, filter, refresh, result.Snapshot.Captures.Count).ConfigureAwait(false);
             // A cached list raises no Saved event, but may still have pages left to preload.
             if (result.FromDatabase && result.Snapshot.Captures.Any(c => c.Capture.IsHtml && !c.Ready))
@@ -101,7 +118,25 @@ public sealed class CaptureLoadRunner : IHostedService
         }
     }
 
-    /// The list came from the database (fresh cache) so CaptureCatalog did not touch the operation: a resumed or
+	/// Retries a whole load after a transient failure (network, timeout, 429/5xx) with doubling backoff; permanent
+	/// failures and shutdown propagate immediately. Each attempt is logged; the final failure is rethrown, never swallowed.
+	private async Task<CatalogResult> GetWithRetryAsync(string prefix, string filter, bool refresh)
+	{
+		var retries = Math.Max(0, archiveOptions.LoadRetries);
+		for (var attempt = 1; ; attempt++)
+		{
+			try { return await catalog.GetAsync(prefix, filter, refresh, stopping.Token).ConfigureAwait(false); }
+			catch (Exception ex) when (!stopping.IsCancellationRequested && attempt <= retries && CaptureCatalog.IsTransientFailure(ex))
+			{
+				var delay = TimeSpan.FromSeconds(Math.Min(300, Math.Max(0, archiveOptions.LoadRetryDelaySeconds) * Math.Pow(2, attempt - 1)));
+				log.LogWarning(ex, "captureload.retry attempt={Attempt}/{Max} delayMs={Delay:F0} errorType={Type}", attempt, retries + 1, delay.TotalMilliseconds, ex.GetType().Name);
+				if (time is not null) await time.DelayAsync(delay, stopping.Token).ConfigureAwait(false);
+				else await Task.Delay(delay, stopping.Token).ConfigureAwait(false);
+			}
+		}
+	}
+
+	/// The list came from the database (fresh cache) so CaptureCatalog did not touch the operation: a resumed or
     /// newly queued one must still reach a terminal state.
     private async Task FinishCachedAsync(string prefix, string filter, bool refresh, int count)
     {

@@ -1,4 +1,4 @@
-﻿using Capture = WaybackViewer.Models.Capture;
+using Capture = WaybackViewer.Models.Capture;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using WaybackViewer.Models;
@@ -20,7 +20,7 @@ public class PaginationAndLoadTests
         await host.Store!.SaveSearchAsync("example.com/", "html200", caps, DateTimeOffset.UtcNow);
         await host.Store.SavePagesAsync(caps.Take(Math.Min(count, 300)).Select((c, i) =>
             new NewPage(c, HtmlCodec.Compress($"<html><body>word{i}</body></html>"),
-                new ParsedPage("t" + i, null, "word" + i, new PageMetadata(Likes: i)), DateTimeOffset.UtcNow)).ToList());
+                new ParsedPage("t" + i, null, "word" + i, new PageMetadata(Likes: i, Confidence: 0.6)), DateTimeOffset.UtcNow)).ToList());
         return host;
     }
 

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using WaybackViewer.Models;
 
 namespace WaybackViewer.Storage;
@@ -16,6 +17,19 @@ public sealed class HtmlFileStore
     }
 
     public string Root => root;
+
+    /// Process-wide payload I/O counters, reported by RuntimeMetricsLogger as `htmlstore.metrics`.
+    public static long Saves, SaveBytes, SaveRetries, Loads, LoadMisses;
+
+    /// Zeroes the counters (test isolation).
+    public static void ResetCounters()
+    {
+        Interlocked.Exchange(ref Saves, 0); Interlocked.Exchange(ref SaveBytes, 0); Interlocked.Exchange(ref SaveRetries, 0);
+        Interlocked.Exchange(ref Loads, 0); Interlocked.Exchange(ref LoadMisses, 0);
+    }
+
+    /// Optional logger (the store is created outside DI); set once at startup.
+    public static ILogger? Log { get; set; }
 
     public string PathFor(Capture capture)
     {
@@ -46,10 +60,14 @@ public sealed class HtmlFileStore
                     BufferSize = 1
                 });
                 await stream.WriteAsync(htmlGz, ct).ConfigureAwait(false);
+                Interlocked.Increment(ref Saves);
+                Interlocked.Add(ref SaveBytes, htmlGz.Length);
                 return;
             }
-            catch (IOException) when (attempt < 4)
+            catch (IOException ex) when (attempt < 4)
             {
+                Interlocked.Increment(ref SaveRetries);
+                Log?.LogWarning("htmlstore.retry attempt={Attempt} errorType={Type} hresult={HResult}", attempt + 1, ex.GetType().Name, ex.HResult);
                 await Task.Delay(15 * (attempt + 1), ct).ConfigureAwait(false);
             }
         }
@@ -58,7 +76,8 @@ public sealed class HtmlFileStore
     public async Task<byte[]?> LoadAsync(Capture capture, CancellationToken ct = default)
     {
         var path = PathFor(capture);
-        if (!File.Exists(path)) return null;
+        Interlocked.Increment(ref Loads);
+        if (!File.Exists(path)) { Interlocked.Increment(ref LoadMisses); return null; }
         await using var stream = new FileStream(path, new FileStreamOptions
         {
             Mode = FileMode.Open,

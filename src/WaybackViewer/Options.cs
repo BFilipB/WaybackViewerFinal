@@ -8,7 +8,11 @@ public sealed class ArchiveOptions
     public int MinIntervalMs { get; set; } = 100;
     public int MaxIntervalMs { get; set; } = 10_000;
     public int MaxAttempts { get; set; } = 5;
-    public int RequestTimeoutSeconds { get; set; } = 180;
+	public int RequestTimeoutSeconds { get; set; } = 180;
+	/// Extra attempts of a whole capture-list load after a transient failure (on top of per-request retries).
+	public int LoadRetries { get; set; } = 3;
+	/// Base delay before the first load retry; doubles each time (capped at 5 minutes).
+	public int LoadRetryDelaySeconds { get; set; } = 20;
 }
 
 public sealed class PreloadOptions
@@ -28,6 +32,10 @@ public sealed class PreloadOptions
     /// A database write of preload results is tried this many times before the job is marked Failed.
     /// The pages stay without an outcome, so they are downloaded again on resume/restart. 0 = retry forever.
     public int SaveMaxAttempts { get; set; } = 20;
+    /// Preload pauses (resumable) while the drive holding DiskGuardPath has less free space than this. 0 = guard off.
+    public int MinFreeDiskMb { get; set; } = 500;
+    /// A path on the drive that stores HTML payloads (set it to StorageOptions.HtmlRoot). Empty = the app directory.
+    public string? DiskGuardPath { get; set; }
 }
 
 public sealed class StorageOptions

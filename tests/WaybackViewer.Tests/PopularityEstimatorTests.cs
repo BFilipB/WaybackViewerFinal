@@ -52,4 +52,41 @@ public class PopularityEstimatorTests
         Assert.True(Run("").EffectiveEngagementScore >= 0);
         Assert.True(Run("<<<>>> 99999999999999999999 views").EffectiveEngagementScore >= 0);
     }
+
+    [Fact]
+    public void Explicit_zero_is_measured_and_outranks_an_estimate()
+    {
+        var zero = Run("<body><shreddit-post comment-count=\"0\">post</shreddit-post></body>");
+        var estimated = Run("<body><p>" + new string('x', 4000) + "</p><a href='/a'>a</a></body>");
+        Assert.Equal(0, zero.Comments);
+        Assert.Equal(2, zero.Tier);
+        Assert.Equal(1, estimated.Tier);
+        Assert.True(zero.Tier > estimated.Tier);
+    }
+
+    [Fact]
+    public void Archive_signal_only_rows_are_the_lowest_tier()
+    {
+        Assert.Equal(0, new PageMetadata(EngagementScore: 50, Confidence: 0.1).Tier);
+    }
+
+    [Fact]
+    public void Structured_score_attribute_is_measured()
+    {
+        var html = "<shreddit-post score=\"42\" comment-count=\"7\">x</shreddit-post>";
+        var m = PopularityEstimator.Enrich(null, html, "x");
+        Assert.Equal(42, m.Score);
+        Assert.Equal(7, m.Comments);
+        Assert.Equal(2, m.Tier);
+    }
+
+    [Fact]
+    public void Norwegian_forum_counts_are_measured()
+    {
+        var text = "Tema A 12 svar 340 visninger Tema B 4 svar 90 visninger";
+        var m = PopularityEstimator.Enrich(null, "<table></table>", text);
+        Assert.Equal(4, m.Comments);
+        Assert.Equal(90, m.Views);
+        Assert.Equal(2, m.Tier);
+    }
 }

@@ -10,6 +10,7 @@ public sealed class OperationControl(IArchiveStore store, PreloadCoordinator pre
 {
     public async Task PauseAsync(SearchKey search, CancellationToken ct = default)
     {
+        var count = 0;
         foreach (var op in await store.GetOperationsForSearchAsync(search.Prefix, search.Filter, ct).ConfigureAwait(false))
         {
             if (!op.IsActive || OperationStates.Normalize(op.State) == OperationState.Paused) continue;
@@ -17,14 +18,18 @@ public sealed class OperationControl(IArchiveStore store, PreloadCoordinator pre
                 preload.Pause(op.Prefix, op.Filter);
             else
                 await SetAsync(op, OperationState.Paused, ct).ConfigureAwait(false);
+            count++;
         }
+        log.LogInformation("operation.control action=pause prefix={Prefix} filter={Filter} operations={Count}", search.Prefix, search.Filter, count);
     }
 
     public async Task ResumeAsync(SearchKey search, CancellationToken ct = default)
     {
+        var count = 0;
         foreach (var op in await store.GetOperationsForSearchAsync(search.Prefix, search.Filter, ct).ConfigureAwait(false))
         {
             if (OperationStates.Normalize(op.State) is not (OperationState.Paused or OperationState.Interrupted)) continue;
+            count++;
             if (op.Kind == OperationKind.PagePreload)
             {
                 if (preload.HasJob(op.Prefix, op.Filter)) { preload.Resume(op.Prefix, op.Filter); continue; }
@@ -38,10 +43,15 @@ public sealed class OperationControl(IArchiveStore store, PreloadCoordinator pre
                 loads.Start(op.Prefix, op.Filter, op.Kind == OperationKind.WaybackRefresh);
             }
         }
+        log.LogInformation("operation.control action=resume prefix={Prefix} filter={Filter} operations={Count}", search.Prefix, search.Filter, count);
     }
 
-    public Task<int> RetryFailedAsync(SearchKey search, CancellationToken ct = default) =>
-        preload.RetryFailedAsync(search.Prefix, search.Filter, ct);
+    public async Task<int> RetryFailedAsync(SearchKey search, CancellationToken ct = default)
+    {
+        var retried = await preload.RetryFailedAsync(search.Prefix, search.Filter, ct).ConfigureAwait(false);
+        log.LogInformation("operation.control action=retry_failed prefix={Prefix} filter={Filter} pages={Count}", search.Prefix, search.Filter, retried);
+        return retried;
+    }
 
     /// Downloads the capture list again (a WaybackRefresh); new captures are then preloaded as a delta.
     public async Task RefreshAsync(SearchKey search, CancellationToken ct = default)
@@ -49,6 +59,7 @@ public sealed class OperationControl(IArchiveStore store, PreloadCoordinator pre
         await store.CreateOrGetOperationAsync(search.Prefix, search.Filter, OperationKind.WaybackRefresh,
             DateTimeOffset.UtcNow, ct).ConfigureAwait(false);
         loads.Start(search.Prefix, search.Filter, refresh: true);
+        log.LogInformation("operation.control action=refresh prefix={Prefix} filter={Filter}", search.Prefix, search.Filter);
     }
 
     private async Task<bool> SetAsync(BackgroundOperation op, OperationState state, CancellationToken ct)

@@ -5,3 +5,7 @@ obj/
 *.suo
 App_Data/
 TestResults/
+
+# Local diagnostic logs (never commit)
+*.log
+logs/

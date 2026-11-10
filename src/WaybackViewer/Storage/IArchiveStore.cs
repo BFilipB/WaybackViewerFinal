@@ -1,4 +1,4 @@
-﻿using WaybackViewer.Models;
+using WaybackViewer.Models;
 
 namespace WaybackViewer.Storage;
 
@@ -103,6 +103,15 @@ public interface IArchiveStore
     /// Distinct MIME types / status codes of one searched URL (bounded, in SQL). Null = not supported (callers fall back to a fixed list).
     Task<UrlCaptureOptions?> GetUrlCaptureOptionsAsync(long searchId, CancellationToken ct = default) =>
         Task.FromResult<UrlCaptureOptions?>(null);
+
+    /// Saved pages of a search without a publish date, after the given capture id (bounded batch, in SQL). Drives the published-date backfill.
+    Task<IReadOnlyList<StoredCapture>> GetPagesMissingPublishedAsync(string prefix, string filter, long afterId, int limit,
+        CancellationToken ct = default) => Task.FromResult<IReadOnlyList<StoredCapture>>([]);
+    /// Saved pages whose metadata was written by an older extractor version (bounded, keyset-paged).
+    Task<IReadOnlyList<StoredCapture>> GetPagesWithStaleExtractorAsync(string prefix, string filter, int currentVersion, long afterId, int limit,
+        CancellationToken ct = default) => Task.FromResult<IReadOnlyList<StoredCapture>>([]);
+    /// Rewrites only the metadata rows of already-saved pages (no payload/text rewrite), in one transaction.
+    Task UpdateMetadataAsync(IReadOnlyList<(Capture Capture, PageMetadata Metadata)> items, CancellationToken ct = default) => Task.CompletedTask;
 
     /// One page of the facet-filtered list plus facet counts, all computed in SQL. Null = not supported / free-text
     /// filter (the caller falls back to the in-memory list).

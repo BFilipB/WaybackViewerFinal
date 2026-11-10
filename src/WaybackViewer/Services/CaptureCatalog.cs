@@ -7,8 +7,10 @@ using WaybackViewer.Storage;
 namespace WaybackViewer.Services;
 
 /// Resolves "all captures under this URL": database first, Wayback CDX only when needed.
-public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, IOptions<StorageOptions> options, ITimeSource time)
+public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, IOptions<StorageOptions> options, ITimeSource time,
+    ILogger<CaptureCatalog>? logger = null)
 {
+    private readonly ILogger log = (ILogger?)logger ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     private readonly ConcurrentDictionary<string, Lazy<Task<CatalogResult>>> inflight = new(StringComparer.Ordinal);
 
     public Task<CatalogResult> GetAsync(string prefix, string filter, bool refresh, CancellationToken ct = default)
@@ -36,7 +38,11 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
             refreshTasks.Add(Task.Run(async () =>
             {
                 try { await GetAsync(prefix, filter, refresh: true).ConfigureAwait(false); }
-                catch { /* the saved list stays; the failed operation is recorded by LoadAsync */ }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // the saved list stays; the failed operation is recorded by LoadAsync
+                    log.LogWarning(ex, "catalog.background_refresh_failed prefix={Prefix} filter={Filter} errorType={Type}", prefix, filter, ex.GetType().Name);
+                }
                 finally { lock (refreshLock) refreshingKeys.Remove(key); }
             }));
         }
@@ -74,7 +80,12 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
 
         if (!refresh && saved is not null)
         {
-            if (!IsExpired(saved.CachedAt)) return new CatalogResult(saved, true);
+            if (!IsExpired(saved.CachedAt))
+            {
+                log.LogInformation("catalog.load source=db prefix={Prefix} filter={Filter} rows={Rows} ageHours={Age:F1}", prefix, filter, saved.Captures.Count, (time.UtcNow - saved.CachedAt.UtcDateTime).TotalHours);
+                return new CatalogResult(saved, true);
+            }
+            log.LogInformation("catalog.expired prefix={Prefix} filter={Filter} ageHours={Age:F1} maxDays={Max}", prefix, filter, (time.UtcNow - saved.CachedAt.UtcDateTime).TotalHours, options.Value.SearchMaxAgeDays);
 
             // Stale snapshots must revalidate before returning the result so the visible list reflects current data.
             // This keeps the behavior consistent with the cache-refresh tests and avoids serving old data as if it were current.
@@ -84,23 +95,29 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
         var operation = await store.CreateOrGetOperationAsync(prefix, filter, kind, DateTimeOffset.UtcNow)
             .ConfigureAwait(false);
         if (OperationStates.Normalize(operation.State) == OperationState.Paused && saved is not null)
+        {
+            log.LogInformation("catalog.load source=db_paused prefix={Prefix} filter={Filter} rows={Rows}", prefix, filter, saved.Captures.Count);
             return new CatalogResult(saved, true);   // paused by the user: keep serving the saved list, do not download
+        }
         operation = operation with { State = OperationState.Running, UpdatedAt = DateTimeOffset.UtcNow };
         await store.UpdateOperationAsync(operation).ConfigureAwait(false);
 
+        var cdxStart = System.Diagnostics.Stopwatch.GetTimestamp();
         string json;
         try
         {
             json = await archive.GetStringAsync(ArchiveUrls.Cdx(prefix, filter)).ConfigureAwait(false);
         }
-        catch (Exception) when (saved is not null)
+        catch (Exception ex) when (saved is not null)
         {
+            log.LogWarning(ex, "catalog.stale_fallback prefix={Prefix} filter={Filter} rows={Rows} cdxMs={Ms:F0} errorType={Type}", prefix, filter, saved.Captures.Count, System.Diagnostics.Stopwatch.GetElapsedTime(cdxStart).TotalMilliseconds, ex.GetType().Name);
             await CompleteAsync(operation, saved.Captures.Count, "Wayback unavailable; showing the previous cached capture list.")
                 .ConfigureAwait(false);
             return new CatalogResult(saved, true); // Wayback unreachable: serve the stale copy instead of failing
         }
         catch (Exception ex)
         {
+            log.LogWarning(ex, "catalog.cdx_failed prefix={Prefix} filter={Filter} cdxMs={Ms:F0} errorType={Type}", prefix, filter, System.Diagnostics.Stopwatch.GetElapsedTime(cdxStart).TotalMilliseconds, ex.GetType().Name);
             await store.UpdateOperationAsync(operation with
             {
                 State = OperationState.Failed,
@@ -110,9 +127,20 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
             throw;
         }
 
-        var captures = CdxParser.Parse(json);
+        var cdxMs = System.Diagnostics.Stopwatch.GetElapsedTime(cdxStart).TotalMilliseconds;
+        var parseStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        var captures = CdxParser.Parse(json, out var skippedRows);
+        var parseMs = System.Diagnostics.Stopwatch.GetElapsedTime(parseStart).TotalMilliseconds;
+        if (skippedRows > 0)
+            log.LogWarning("catalog.parse_skipped prefix={Prefix} filter={Filter} skippedRows={Skipped} rows={Rows}", prefix, filter, skippedRows, captures.Count);
+        var saveStart = System.Diagnostics.Stopwatch.GetTimestamp();
         var now = new DateTimeOffset(DateTime.SpecifyKind(time.UtcNow, DateTimeKind.Utc));
         var snapshot = await store.SaveSearchAsync(prefix, filter, captures, now).ConfigureAwait(false);
+        log.LogInformation("catalog.load source=cdx prefix={Prefix} filter={Filter} refresh={Refresh} rows={Rows} jsonChars={Chars} cdxMs={Cdx:F0} parseMs={Parse:F0} saveMs={Save:F0} hadSaved={HadSaved}",
+            prefix, filter, refresh, snapshot.Captures.Count, json.Length, cdxMs, parseMs, System.Diagnostics.Stopwatch.GetElapsedTime(saveStart).TotalMilliseconds, saved is not null);
+        if (saved is not null)
+            log.LogInformation("catalog.refresh_delta prefix={Prefix} filter={Filter} before={Before} after={After} added={Added} ageHours={Age:F1}",
+                prefix, filter, saved.Captures.Count, snapshot.Captures.Count, snapshot.Captures.Count - saved.Captures.Count, (time.UtcNow - saved.CachedAt.UtcDateTime).TotalHours);
         await CompleteAsync(operation, snapshot.Captures.Count).ConfigureAwait(false);
         if (Saved is { } handler)
             foreach (var h in handler.GetInvocationList().Cast<Func<string, string, SearchSnapshot, Task>>())
@@ -133,7 +161,16 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
     }
 
     /// Client-safe description of a capture-list failure (never the raw exception message).
-    public static string DescribeFailure(Exception ex) => ex switch
+	/// Worth retrying later: network errors, timeouts, 408/429 and 5xx. Not-found/other 4xx and bugs are permanent.
+	public static bool IsTransientFailure(Exception ex) => ex switch
+	{
+		ArchiveRequestException a => (int)a.StatusCode is 408 or 429 or >= 500,
+		HttpRequestException or TimeoutException or IOException => true,
+		TaskCanceledException => true,   // HttpClient timeout (caller cancellation is checked before this)
+		_ => false
+	};
+
+	public static string DescribeFailure(Exception ex) => ex switch
     {
         ArchiveRequestException a => $"Wayback answered HTTP {(int)a.StatusCode}.",
         HttpRequestException => "Wayback could not be reached.",

@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -39,7 +39,14 @@ jobs:
       - name: Run timing-sensitive performance tests (informational, never blocks the build)
         continue-on-error: true
         run: dotnet test --no-build -c Release --nologo --filter "Category=Performance" --logger "trx;LogFileName=perf.trx" --results-directory TestResults
-      - uses: actions/upload-artifact@v4
+      - name: Popularity test summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Popularity tests"
+            dotnet test --no-build -c Release --nologo --filter "FullyQualifiedName~Popularity|FullyQualifiedName~Coverage|FullyQualifiedName~MeasuredOnly|FullyQualifiedName~MaxThreshold|FullyQualifiedName~LeastSort|FullyQualifiedName~Extraction|FullyQualifiedName~PhpBb|FullyQualifiedName~Multilingual|FullyQualifiedName~RedditAttribute" 2>&1 | grep -E "Passed!|Failed!|^\s+Failed " || true
+          } >> "$GITHUB_STEP_SUMMARY"      - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: test-results

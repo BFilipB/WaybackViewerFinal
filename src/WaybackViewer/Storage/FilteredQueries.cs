@@ -310,7 +310,7 @@ internal static class FilteredQueries
     private static string PopularityCtes(SqlDialect d, PopularityQuery p)
     {
         var pm = p.Metric == "none" ? "0" : $"CASE WHEN HasM = 1 THEN {MetricSql(d, p.Metric, true)} ELSE {MetricSql(d, p.Metric, false)} END";
-        var ps = p.Sort == "newest" ? "0" : $"CASE WHEN HasM = 1 THEN {MetricSql(d, p.Sort, true)} ELSE {MetricSql(d, p.Sort, false)} END";
+        var ps = p.Sort is "newest" or "published" ? "0" : $"CASE WHEN HasM = 1 THEN {MetricSql(d, p.SortMetric, true)} ELSE {MetricSql(d, p.SortMetric, false)} END";
         var score = d.TruncToInt($"99.0 * ((cum.lo + cum.hi) / 2.0) / {d.Greatest("cum.n", "1")}");
         return $"""
             , bs AS (SELECT sg.CaptureId, sg.Host, sg.Raw FROM CaptureSignals sg
@@ -329,7 +329,9 @@ internal static class FilteredQueries
                 LEFT JOIN PageMetadata m ON m.CaptureId = v.Id
                 LEFT JOIN CaptureSignals sg ON sg.SearchId = @id AND sg.CaptureId = v.Id
                 LEFT JOIN cum ON cum.Host = sg.Host AND cum.Raw = sg.Raw),
-            pm AS (SELECT mm.*, {pm} AS Pm, {ps} AS Ps FROM mm)
+            pm0 AS (SELECT mm.*, {pm} AS Pm, {ps} AS Ps, ({ps}) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Wk,
+                CASE WHEN HasM = 0 THEN 0 WHEN mConf >= 0.5 THEN 2 WHEN mConf >= 0.15 THEN 1 ELSE 0 END AS Tr FROM mm),
+            pm AS (SELECT pm0.*, CUME_DIST() OVER (PARTITION BY Tr ORDER BY Ps) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Pk FROM pm0)
             """;
     }
 
@@ -349,11 +351,13 @@ internal static class FilteredQueries
         {
             cte += PopularityCtes(d, pop);
             from = "pm";
-            if (pop.Sort != "newest") order = "Ps DESC, CaptureTs DESC, Id DESC";
-            if (pop.Metric != "none" && pop.Threshold > 0)
+            if (pop.Sort == "published") order = "CASE WHEN mPub IS NULL THEN 1 ELSE 0 END, mPub DESC, CaptureTs DESC, Id DESC";
+            else if (pop.Sort != "newest") order = pop.Least ? "Tr DESC, Pk ASC, Wk ASC, CaptureTs DESC, Id DESC" : "Tr DESC, Pk DESC, Wk DESC, CaptureTs DESC, Id DESC";   // measured > estimated > archive signal
+            if (pop.Metric != "none" && (pop.Threshold > 0 || pop.MaxThreshold > 0))
             {
-                kept = " WHERE Pm >= @thr";
+                kept = $" WHERE Pm >= @thr AND Tr >= {pop.MinTier}" + (pop.MaxThreshold > 0 ? " AND Pm <= @max" : "");
                 args.Add(("@thr", (long)pop.Threshold));
+                if (pop.MaxThreshold > 0) args.Add(("@max", (long)pop.MaxThreshold));
             }
         }
 
@@ -404,14 +408,27 @@ internal static class FilteredQueries
 
         List<PopularityPreset>? presets = null;
         List<int>? histogram = null;
+        int coverageMeasured = 0, coverageTotal = 0; Dictionary<string, int>? metricCoverage = null;
         if (pop is not null && pop.Metric != "none")
         {
             presets = [];
-            if (everything > 0)
+            using (var cov = Cmd(conn, null, cte + " SELECT COUNT(*), COALESCE(SUM(CASE WHEN Tr >= 2 THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN Tr >= 2 AND mV IS NOT NULL THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN Tr >= 2 AND mL IS NOT NULL THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN Tr >= 2 AND mC IS NOT NULL THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN Tr >= 2 AND mS IS NOT NULL THEN 1 ELSE 0 END), 0) FROM pm"))
+            {
+                Bind(cov, args);
+                using var cr = cov.ExecuteReader();
+                if (cr.Read()) { coverageTotal = Convert.ToInt32(cr.GetValue(0)); coverageMeasured = Convert.ToInt32(cr.GetValue(1)); metricCoverage = new() { ["views"] = Convert.ToInt32(cr.GetValue(2)), ["likes"] = Convert.ToInt32(cr.GetValue(3)), ["comments"] = Convert.ToInt32(cr.GetValue(4)), ["score"] = Convert.ToInt32(cr.GetValue(5)) }; }
+            }
+            int eligible;
+            using (var el = Cmd(conn, null, cte + $" SELECT COUNT(*) FROM pm WHERE Tr >= {pop.MinTier}"))
+            {
+                Bind(el, args);
+                eligible = Convert.ToInt32(el.ExecuteScalar());
+            }
+            if (eligible > 0)
                 foreach (var percent in new[] { 10, 25, 50 })
                 {
-                    var index = Math.Clamp((int)Math.Ceiling(everything * percent / 100.0) - 1, 0, everything - 1);
-                    using var preset = Cmd(conn, null, cte + " SELECT Pm FROM pm ORDER BY Pm DESC LIMIT 1 OFFSET @o");
+                    var index = Math.Clamp((int)Math.Ceiling(eligible * percent / 100.0) - 1, 0, eligible - 1);
+                    using var preset = Cmd(conn, null, cte + $" SELECT Pm FROM pm WHERE Tr >= {pop.MinTier} ORDER BY Pm DESC LIMIT 1 OFFSET @o");
                     Bind(preset, args);
                     Param(preset, "@o", index);
                     var value = Convert.ToInt64(preset.ExecuteScalar());
@@ -420,16 +437,16 @@ internal static class FilteredQueries
                 }
 
             var bins = new int[HistogramBuckets];
-            if (everything > 0)
+            if (eligible > 0)
             {
                 long max;
-                using (var maxCmd = Cmd(conn, null, cte + " SELECT MAX(Pm) FROM pm"))
+                using (var maxCmd = Cmd(conn, null, cte + $" SELECT COALESCE(MAX(Pm), 0) FROM pm WHERE Tr >= {pop.MinTier}"))
                 {
                     Bind(maxCmd, args);
                     max = Convert.ToInt64(maxCmd.ExecuteScalar());
                 }
                 var bucket = d.Least((HistogramBuckets - 1).ToString(), $"Pm * {HistogramBuckets} / (@max + 1)");
-                using var hist = Cmd(conn, null, cte + $" SELECT CASE WHEN @max <= 0 THEN 0 ELSE {bucket} END AS b, COUNT(*) FROM pm GROUP BY CASE WHEN @max <= 0 THEN 0 ELSE {bucket} END");
+                using var hist = Cmd(conn, null, cte + $" SELECT CASE WHEN @max <= 0 THEN 0 ELSE {bucket} END AS b, COUNT(*) FROM pm WHERE Tr >= {pop.MinTier} GROUP BY CASE WHEN @max <= 0 THEN 0 ELSE {bucket} END");
                 Bind(hist, args);
                 Param(hist, "@max", max);
                 using var reader = hist.ExecuteReader();
@@ -466,7 +483,7 @@ internal static class FilteredQueries
 
         var cachedAt = DateTimeOffset.FromUnixTimeMilliseconds(cachedAtMs);
         return new FilteredPage(id, cachedAt, page, total, rows, ReadFacets(conn, memo, version, id, cachedAtMs, ct), groupSizes, htmlTotal,
-            unsavedTotal, unsavedInView, popularity, everything - total, presets, histogram, pop is null ? 0 : unsavedInView);
+            unsavedTotal, unsavedInView, popularity, everything - total, presets, histogram, pop is null ? 0 : unsavedInView, coverageMeasured, coverageTotal, metricCoverage);
     }
 
     /// How many captures each thread/post/page has under the same filters, ignoring the type filter and the

@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging;
 using WaybackViewer.Models;
 using WaybackViewer.Parsing;
 
@@ -143,6 +144,9 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
 
     private static string CacheKey(string prefix, string filter) => filter + "|" + prefix;
 
+    /// Optional diagnostics sink, set by StoreInitializer; the store works without it.
+    public ILogger? Log { get; set; }
+
     public SqliteArchiveStore(string connectionString)
         : this(connectionString, new HtmlFileStore(AppBuilder.ResolveDatabasePath("html-payloads")))
     {
@@ -171,6 +175,7 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
             cmd.ExecuteNonQuery();
         }
         EnsureClassificationSchema(conn);
+        EnsureMetadataVersionColumn(conn);
         ClassifyPending(conn, ct);   // one-time: Year/Category/Section/Kind/GroupKey for captures saved before they existed
         UrlQueries.Backfill(conn);   // one-time: summary rows for searches saved before the summary table existed
         using (var optimize = Cmd(conn, null, "PRAGMA optimize")) optimize.ExecuteNonQuery();
@@ -608,6 +613,8 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
             using var conn = Open();
             using var tx = conn.BeginTransaction();
 
+            var saveStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            long payloadTicks = 0, payloadBytes = 0;
             using var insertCapture = Cmd(conn, tx,
                 "INSERT OR IGNORE INTO Captures (CaptureTs, Original, MimeType, StatusCode) VALUES ($ts, $o, $m, $s)");
             var cTs = insertCapture.Parameters.Add("$ts", SqliteType.Text);
@@ -630,7 +637,7 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
             var tId = insertText.Parameters.Add("$id", SqliteType.Integer);
             var tB = insertText.Parameters.Add("$b", SqliteType.Text);
 
-            using var upsertMetadata = Cmd(conn, tx, "INSERT OR REPLACE INTO PageMetadata (CaptureId, Views, Likes, Shares, Comments, Score, EngagementScore, Source, Author, PublishedAtUtc, Tags, Confidence) VALUES ($id, $views, $likes, $shares, $comments, $score, $engagement, $source, $author, $published, $tags, $confidence)");
+            using var upsertMetadata = Cmd(conn, tx, "INSERT OR REPLACE INTO PageMetadata (CaptureId, Views, Likes, Shares, Comments, Score, EngagementScore, Source, Author, PublishedAtUtc, Tags, Confidence, ExtractorVersion) VALUES ($id, $views, $likes, $shares, $comments, $score, $engagement, $source, $author, $published, $tags, $confidence, $ev)");
             var mId = upsertMetadata.Parameters.Add("$id", SqliteType.Integer);
             var mViews = upsertMetadata.Parameters.Add("$views", SqliteType.Integer);
             var mLikes = upsertMetadata.Parameters.Add("$likes", SqliteType.Integer);
@@ -643,6 +650,8 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
             var mPublished = upsertMetadata.Parameters.Add("$published", SqliteType.Integer);
             var mTags = upsertMetadata.Parameters.Add("$tags", SqliteType.Text);
             var mConfidence = upsertMetadata.Parameters.Add("$confidence", SqliteType.Real);
+            var mVersion = upsertMetadata.Parameters.Add("$ev", SqliteType.Integer);
+            mVersion.Value = ExtractorVersion.Current;
 
             using var upsertIndex = Cmd(conn, tx, "INSERT OR REPLACE INTO CaptureSearch (CaptureId, SearchText) VALUES ($id, $s)");
             var sId = upsertIndex.Parameters.Add("$id", SqliteType.Integer);
@@ -681,7 +690,10 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
                 mPublished.Value = metadata?.PublishedAt?.ToUnixTimeMilliseconds() is long published ? published : DBNull.Value;
                 mTags.Value = (object?)metadata?.Tags ?? DBNull.Value;
                 mConfidence.Value = metadata is null ? DBNull.Value : metadata.Confidence;
+                var fileStart = System.Diagnostics.Stopwatch.GetTimestamp();
                 htmlFiles.SaveAsync(page.Capture, page.HtmlGz, ct).GetAwaiter().GetResult();
+                payloadTicks += System.Diagnostics.Stopwatch.GetTimestamp() - fileStart;
+                payloadBytes += page.HtmlGz.Length;
                 hH.Value = Array.Empty<byte>();
                 insertPage.ExecuteNonQuery();
                 insertText.ExecuteNonQuery();
@@ -696,7 +708,16 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
                 insertHtml.ExecuteNonQuery();
             }
 
+            var commitStart = System.Diagnostics.Stopwatch.GetTimestamp();
             tx.Commit();
+            if (Log is { } saveLog)
+            {
+                var totalMs = System.Diagnostics.Stopwatch.GetElapsedTime(saveStart).TotalMilliseconds;
+                var payloadMs = payloadTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                saveLog.Log(totalMs > 1000 ? LogLevel.Warning : LogLevel.Information,
+                    "store.save_pages pages={Pages} totalMs={Total:F0} payloadFileMs={FileMs:F0} payloadBytes={Bytes} commitMs={Commit:F0}",
+                    pages.Count, totalMs, payloadMs, payloadBytes, System.Diagnostics.Stopwatch.GetElapsedTime(commitStart).TotalMilliseconds);
+            }
             MarkSaved(newIds);
             return 0;
         }, ct);
@@ -791,7 +812,7 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
         var conn = new SqliteConnection(connectionString);
         conn.Open();
         using var pragma = conn.CreateCommand();
-        pragma.CommandText = "PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-65536; PRAGMA busy_timeout=15000;";
+        pragma.CommandText = "PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-65536; PRAGMA mmap_size=268435456; PRAGMA wal_autocheckpoint=4000; PRAGMA busy_timeout=15000;";
         pragma.ExecuteNonQuery();
         // Free-text URL filter: the C# matcher runs inside SQL so paging stays bounded.
         conn.CreateFunction("url_match", (string? q, string? v) => SearchTextMatcher.Matches(q ?? string.Empty, v) ? 1 : 0);

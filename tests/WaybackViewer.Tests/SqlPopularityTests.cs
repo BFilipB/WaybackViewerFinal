@@ -51,7 +51,7 @@ public class SqlPopularityTests
         var threshold = (int)meta.Values.Select(m => m.EffectiveEngagementScore).OrderBy(x => x).ElementAt(all.Count / 2);
         var expected = Expected(all, threshold);
 
-        var page = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 100, null, new PopularityQuery("score", "engaged", threshold));
+        var page = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 100, null, new PopularityQuery("score", "engaged", threshold, IncludeEstimates: true));
         Assert.Equal(expected.Count, page!.Total);
         Assert.Equal(all.Count - expected.Count, page.PopularityExcluded);
         Assert.Equal(expected.OrderBy(x => x), page.Captures.Select(c => c.Id).OrderBy(x => x));
@@ -62,7 +62,7 @@ public class SqlPopularityTests
     public async Task Histogram_and_presets_cover_every_capture()
     {
         var (store, all) = await Make();
-        var page = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 5, null, new PopularityQuery("newest", "engaged", 0));
+        var page = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 5, null, new PopularityQuery("newest", "engaged", 0, IncludeEstimates: true));
         Assert.Equal(10, page!.Histogram!.Count);
         Assert.Equal(all.Count, page.Histogram.Sum());
         Assert.All(page.Presets!, p => Assert.True(p.Value > 0));
@@ -88,5 +88,22 @@ public class SqlPopularityTests
         var page = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 100, null, new PopularityQuery("popular", "none", 0));
         Assert.Equal(20, page!.Total);
         Assert.Equal(20, page.Captures.Select(c => c.Id).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task Measured_zero_outranks_estimate_and_archive_signal_only_rows()
+    {
+        var (store, all) = await Make(6);
+        NewPage Save(StoredCapture c, PageMetadata m) =>
+            new(c.Capture, HtmlCodec.Compress("<html><body>x</body></html>"), new ParsedPage(null, null, "x", m), DateTimeOffset.UtcNow);
+        var zero = all[0]; var estimate = all[1];
+        await store.SavePagesAsync([
+            Save(zero, new PageMetadata(Comments: 0, EngagementScore: 0, Confidence: 0.6)),
+            Save(estimate, new PageMetadata(EngagementScore: 250, Confidence: 0.2))]);
+
+        var page = await store.GetPopularPageAsync("a.com/", "all", new CaptureFilter(), 1, 100, null, new PopularityQuery("engaged", "none", 0));
+        var ids = page!.Captures.Select(c => c.Id).ToList();
+        Assert.Equal(zero.Id, ids[0]);
+        Assert.Equal(estimate.Id, ids[1]);
     }
 }

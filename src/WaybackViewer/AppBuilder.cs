@@ -18,6 +18,9 @@ public static class AppBuilder
         var builder = WebApplication.CreateBuilder(args);
         if (overrides is not null) builder.Configuration.AddInMemoryCollection(overrides);
 
+        if (builder.Configuration["Logging:File:Directory"] is { Length: > 0 } logDir)
+            builder.Logging.AddProvider(new FileLoggerProvider(logDir,
+                Enum.TryParse<LogLevel>(builder.Configuration["Logging:File:MinLevel"], out var lvl) ? lvl : LogLevel.Information));
         var services = builder.Services;
         services.Configure<ArchiveOptions>(builder.Configuration.GetSection("Archive"));
         services.Configure<PreloadOptions>(builder.Configuration.GetSection("Preload"));
@@ -45,7 +48,7 @@ public static class AppBuilder
         services.AddSingleton<IArchiveClient>(sp =>
         {
             var options = sp.GetRequiredService<IOptions<ArchiveOptions>>();
-            return new ArchiveClient(ArchiveClient.CreateHttpClient(options.Value), options, sp.GetRequiredService<ITimeSource>());
+            return new ArchiveClient(ArchiveClient.CreateHttpClient(options.Value), options, sp.GetRequiredService<ITimeSource>(), sp.GetService<ILogger<ArchiveClient>>());
         });
         services.AddSingleton<IPageLoader, PageLoader>();
         services.AddSingleton<CaptureCatalog>();
@@ -62,6 +65,7 @@ public static class AppBuilder
         services.AddHostedService(sp => sp.GetRequiredService<DeleteRunner>());
         services.AddSingleton<OperationEventBus>();
         services.AddHostedService<OperationEventPublisher>();
+        services.AddHostedService<RuntimeMetricsLogger>();
         services.AddSingleton<WarmupService>();
         services.AddHostedService(sp => sp.GetRequiredService<WarmupService>());
 
@@ -85,21 +89,34 @@ public static class AppBuilder
 
         var app = builder.Build();
         app.UseMiddleware<WaybackViewer.Services.RequestTimingMiddleware>();   // Server-Timing + slow-request log
-app.UseResponseCompression();   // big list pages and the filtered-set JSON shrink 10-20x
-		// Static assets: fingerprinted requests (?v=...) never change for a given URL, so cache them for a year;
-		// everything else revalidates (ETag) so an edited file is picked up on the next load.
-		app.UseStaticFiles(new StaticFileOptions
-		{
-			OnPrepareResponse = ctx =>
-				ctx.Context.Response.Headers.CacheControl = ctx.Context.Request.Query.ContainsKey("v")
-					? "public,max-age=31536000,immutable"
-					: "public,max-age=0,must-revalidate"
+app.UseResponseCompression();   // big list pages and the filtered-set JSON shrink 10-20x
+
+		// Static assets: fingerprinted requests (?v=...) never change for a given URL, so cache them for a year;
+
+		// everything else revalidates (ETag) so an edited file is picked up on the next load.
+
+		app.UseStaticFiles(new StaticFileOptions
+
+		{
+
+			OnPrepareResponse = ctx =>
+
+				ctx.Context.Response.Headers.CacheControl = ctx.Context.Request.Query.ContainsKey("v")
+
+					? "public,max-age=31536000,immutable"
+
+					: "public,max-age=0,must-revalidate"
+
 		});
         app.UseRouting();
         app.UseRateLimiter();
         var SseJson = new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web);
-        app.MapGet("/operations/events", async (HttpContext ctx, OperationEventBus bus, CancellationToken ct) =>
+        app.MapGet("/operations/events", async (HttpContext ctx, OperationEventBus bus, ILoggerFactory loggers, CancellationToken ct) =>
         {
+            var sseLog = loggers.CreateLogger("WaybackViewer.Sse");
+            var sseStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var sent = 0;
+            var closeReason = "deadline";
             long after = 0;
             var header = ctx.Request.Headers["Last-Event-ID"].ToString();
             if (!long.TryParse(header, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out after))
@@ -107,6 +124,7 @@ app.UseResponseCompression();   // big list pages and the filtered-set JSON shri
             ctx.Response.Headers.ContentType = "text/event-stream";
             ctx.Response.Headers.CacheControl = "no-cache";
             ctx.Response.Headers["X-Accel-Buffering"] = "no";
+            sseLog.LogInformation("sse.open after={After} reconnect={Reconnect}", after, header.Length > 0);
             await ctx.Response.WriteAsync("retry: 3000\n\n", ct);
             await ctx.Response.Body.FlushAsync(ct);
             var deadline = DateTime.UtcNow.AddMinutes(5);   // client reconnects with Last-Event-ID
@@ -118,6 +136,7 @@ app.UseResponseCompression();   // big list pages and the filtered-set JSON shri
                     {
                         await ctx.Response.WriteAsync($"id: {ev.Id}\nevent: operation\ndata: {System.Text.Json.JsonSerializer.Serialize(ev, SseJson)}\n\n", ct);
                         after = ev.Id;
+                        sent++;
                     }
                     await ctx.Response.Body.FlushAsync(ct);
                     using var tick = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -129,12 +148,21 @@ app.UseResponseCompression();   // big list pages and the filtered-set JSON shri
                     }
                 }
             }
-            catch (OperationCanceledException) { /* client disconnected */ }
+            catch (OperationCanceledException) { closeReason = "client_disconnected"; }
+            finally
+            {
+                sseLog.LogInformation("sse.close reason={Reason} events={Events} lastId={LastId} durationSec={Sec:F0}", closeReason, sent, after,
+                    System.Diagnostics.Stopwatch.GetElapsedTime(sseStart).TotalSeconds);
+            }
         });
-        app.MapGet("/healthz", async (IArchiveStore store) =>
+        app.MapGet("/healthz", async (IArchiveStore store, ILoggerFactory loggers, CancellationToken ct) =>
         {
-            try { await store.GetOperationsAsync(true); return Results.Ok(new { status = "ok" }); }
-            catch { return Results.StatusCode(StatusCodes.Status503ServiceUnavailable); }
+            try { await store.GetOperationsAsync(true, ct); return Results.Ok(new { status = "ok" }); }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                loggers.CreateLogger("WaybackViewer.Health").LogError(ex, "health.failed errorType={Type}", ex.GetType().Name);
+                return Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
+            }
         });
         app.MapDefaultControllerRoute();
         return app;
@@ -158,15 +186,24 @@ app.UseResponseCompression();   // big list pages and the filtered-set JSON shri
         throw new InvalidOperationException($"Unknown Storage:Provider '{provider}'. Available: {available}.");
     }
 
-    /// A relative path is placed in the user's local application-data folder, so the database is found again no
-    /// matter which folder the app is started from (and never ends up inside the git repository).
-    public static string ResolveDatabasePath(string dataSource)
+    /// The drive that holds all data. Override with the WAYBACKVIEWER_DATA_ROOT environment variable.
+    public static string DataRoot =>
+        Environment.GetEnvironmentVariable("WAYBACKVIEWER_DATA_ROOT") is { Length: > 0 } custom ? custom : @"E:\";
+
+    /// A relative path is placed under the data root (E:\ by default). There is deliberately no fallback to another
+    /// drive: when the data root is unavailable this throws, so nothing is ever written to C:.
+    public static string ResolveDatabasePath(string dataSource) => ResolveDatabasePath(dataSource, DataRoot);
+
+    public static string ResolveDatabasePath(string dataSource, string dataRoot)
     {
         var expanded = Environment.ExpandEnvironmentVariables(dataSource);
         if (expanded == ":memory:" || expanded.StartsWith("file:", StringComparison.OrdinalIgnoreCase) || Path.IsPathRooted(expanded))
             return expanded;
-        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        if (string.IsNullOrEmpty(root)) root = AppContext.BaseDirectory;
-        return Path.Combine(root, "WaybackViewer", expanded);
+        var driveRoot = Path.GetPathRoot(dataRoot);
+        if (string.IsNullOrEmpty(driveRoot) || !Directory.Exists(driveRoot))
+            throw new InvalidOperationException(
+                $"The data drive '{driveRoot ?? dataRoot}' is not available. Connect it and restart the app " +
+                "(set WAYBACKVIEWER_DATA_ROOT to use a different drive).");
+        return Path.Combine(dataRoot, "WaybackViewer", expanded);
     }
 }

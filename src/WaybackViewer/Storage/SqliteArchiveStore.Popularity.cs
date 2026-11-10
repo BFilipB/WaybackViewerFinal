@@ -16,10 +16,15 @@ public sealed partial class SqliteArchiveStore
     public async Task<FilteredPage?> GetPopularPageAsync(string prefix, string filter, CaptureFilter f, int page, int pageSize,
         string? contentTerm, PopularityQuery popularity, CancellationToken ct = default)
     {
-        await EnsureClassifiedAsync(ct).ConfigureAwait(false);
-        await EnsureSignalsAsync(prefix, filter, ct).ConfigureAwait(false);
-        return await Task.Run(() => ReadFilteredPage(prefix, filter, f, page, Math.Max(1, pageSize), contentTerm, ct, popularity), ct)
-            .ConfigureAwait(false);
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+		await EnsureClassifiedAsync(ct).ConfigureAwait(false);
+		await EnsureSignalsAsync(prefix, filter, ct).ConfigureAwait(false);
+		var ensureMs = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+		var result = await Task.Run(() => ReadFilteredPage(prefix, filter, f, page, Math.Max(1, pageSize), contentTerm, ct, popularity), ct)
+			.ConfigureAwait(false);
+		Log?.LogInformation("store.read_page kind=popular sort={Sort} metric={Metric} ensureMs={Ensure:F0} readMs={Read:F0} total={Total}",
+			popularity.Sort, popularity.Metric, ensureMs, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds - ensureMs, result?.Total);
+		return result;
     }
 
 	public Task<IReadOnlyList<StoredCapture>?> GetUrlHistoryAsync(string prefix, string filter, string original, int limit,
@@ -47,6 +52,104 @@ public sealed partial class SqliteArchiveStore
 				rows.Add(new StoredCapture(reader.GetInt64(0),
 					new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)), reader.GetInt64(5) != 0));
 			return rows;
+		}, ct);
+
+	public Task<IReadOnlyList<StoredCapture>> GetPagesMissingPublishedAsync(string prefix, string filter, long afterId, int limit,
+		CancellationToken ct = default) =>
+		Task.Run(() =>
+		{
+			using var conn = Open();
+			using var cmd = Cmd(conn, null, """
+				SELECT c.Id, c.CaptureTs, c.Original, c.MimeType, c.StatusCode
+				FROM Searches s JOIN SearchCaptures sc ON sc.SearchId = s.Id JOIN Captures c ON c.Id = sc.CaptureId
+				WHERE s.UrlPrefix = $p AND s.Filter = $f AND c.Id > $after
+				  AND EXISTS (SELECT 1 FROM Pages p WHERE p.CaptureId = c.Id)
+				  AND NOT EXISTS (SELECT 1 FROM PageMetadata m WHERE m.CaptureId = c.Id AND m.PublishedAtUtc IS NOT NULL)
+				ORDER BY c.Id LIMIT $limit
+				""");
+			cmd.Parameters.AddWithValue("$p", prefix);
+			cmd.Parameters.AddWithValue("$f", filter);
+			cmd.Parameters.AddWithValue("$after", afterId);
+			cmd.Parameters.AddWithValue("$limit", Math.Max(1, limit));
+			var rows = new List<StoredCapture>();
+			using var reader = cmd.ExecuteReader();
+			while (reader.Read())
+				rows.Add(new StoredCapture(reader.GetInt64(0),
+					new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)), true));
+			return (IReadOnlyList<StoredCapture>)rows;
+		}, ct);
+
+/// Rewrites only the PageMetadata rows (no payload, text or search-index writes), one transaction for the whole batch.
+public Task UpdateMetadataAsync(IReadOnlyList<(Capture Capture, PageMetadata Metadata)> items, CancellationToken ct = default) =>
+Task.Run(() =>
+{
+if (items.Count == 0) return;
+using var conn = Open();
+using var tx = conn.BeginTransaction();
+using var find = Cmd(conn, tx, "SELECT Id FROM Captures WHERE CaptureTs = $ts AND Original = $o");
+var fTs = find.Parameters.Add("$ts", SqliteType.Text);
+var fO = find.Parameters.Add("$o", SqliteType.Text);
+using var upsert = Cmd(conn, tx, "INSERT OR REPLACE INTO PageMetadata (CaptureId, Views, Likes, Shares, Comments, Score, EngagementScore, Source, Author, PublishedAtUtc, Tags, Confidence, ExtractorVersion) VALUES ($id, $views, $likes, $shares, $comments, $score, $engagement, $source, $author, $published, $tags, $confidence, $ev)");
+var pId = upsert.Parameters.Add("$id", SqliteType.Integer);
+var pViews = upsert.Parameters.Add("$views", SqliteType.Integer);
+var pLikes = upsert.Parameters.Add("$likes", SqliteType.Integer);
+var pShares = upsert.Parameters.Add("$shares", SqliteType.Integer);
+var pComments = upsert.Parameters.Add("$comments", SqliteType.Integer);
+var pScore = upsert.Parameters.Add("$score", SqliteType.Integer);
+var pEngagement = upsert.Parameters.Add("$engagement", SqliteType.Integer);
+var pSource = upsert.Parameters.Add("$source", SqliteType.Text);
+var pAuthor = upsert.Parameters.Add("$author", SqliteType.Text);
+var pPublished = upsert.Parameters.Add("$published", SqliteType.Integer);
+var pTags = upsert.Parameters.Add("$tags", SqliteType.Text);
+var pConfidence = upsert.Parameters.Add("$confidence", SqliteType.Real);
+var pVersion = upsert.Parameters.Add("$ev", SqliteType.Integer);
+pVersion.Value = ExtractorVersion.Current;
+foreach (var (capture, m) in items)
+{
+ct.ThrowIfCancellationRequested();
+fTs.Value = capture.Timestamp;
+fO.Value = capture.Original;
+if (find.ExecuteScalar() is not long id) continue;   // capture no longer stored: nothing to update
+pId.Value = id;
+pViews.Value = DbValue(m.Views);
+pLikes.Value = DbValue(m.Likes);
+pShares.Value = DbValue(m.Shares);
+pComments.Value = DbValue(m.Comments);
+pScore.Value = DbValue(m.Score);
+pEngagement.Value = DbValue(m.EngagementScore);
+pSource.Value = (object?)m.Source ?? DBNull.Value;
+pAuthor.Value = (object?)m.Author ?? DBNull.Value;
+pPublished.Value = m.PublishedAt?.ToUnixTimeMilliseconds() is long p ? p : DBNull.Value;
+pTags.Value = (object?)m.Tags ?? DBNull.Value;
+pConfidence.Value = m.Confidence;
+upsert.ExecuteNonQuery();
+}
+tx.Commit();
+}, ct);
+	public Task<IReadOnlyList<StoredCapture>> GetPagesWithStaleExtractorAsync(string prefix, string filter, int currentVersion, long afterId, int limit,
+		CancellationToken ct = default) =>
+		Task.Run(() =>
+		{
+			using var conn = Open();
+			using var cmd = Cmd(conn, null, """
+				SELECT c.Id, c.CaptureTs, c.Original, c.MimeType, c.StatusCode
+				FROM Searches s JOIN SearchCaptures sc ON sc.SearchId = s.Id JOIN Captures c ON c.Id = sc.CaptureId
+				JOIN PageMetadata m ON m.CaptureId = c.Id
+				WHERE s.UrlPrefix = $p AND s.Filter = $f AND c.Id > $after
+				  AND (m.ExtractorVersion IS NULL OR m.ExtractorVersion < $v)
+				ORDER BY c.Id LIMIT $limit
+				""");
+			cmd.Parameters.AddWithValue("$p", prefix);
+			cmd.Parameters.AddWithValue("$f", filter);
+			cmd.Parameters.AddWithValue("$after", afterId);
+			cmd.Parameters.AddWithValue("$v", currentVersion);
+			cmd.Parameters.AddWithValue("$limit", Math.Max(1, limit));
+			var rows = new List<StoredCapture>();
+			using var reader = cmd.ExecuteReader();
+			while (reader.Read())
+				rows.Add(new StoredCapture(reader.GetInt64(0),
+					new Capture(reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4)), true));
+			return (IReadOnlyList<StoredCapture>)rows;
 		}, ct);
 
 	private async Task EnsureSignalsAsync(string prefix, string filter, CancellationToken ct)
@@ -156,7 +259,7 @@ public sealed partial class SqliteArchiveStore
     private static string PopularityCtes(PopularityQuery p)
     {
         var pm = p.Metric == "none" ? "0" : $"CASE WHEN HasM THEN {MetricSql(p.Metric, true)} ELSE {MetricSql(p.Metric, false)} END";
-        var ps = p.Sort == "newest" ? "0" : $"CASE WHEN HasM THEN {MetricSql(p.Sort, true)} ELSE {MetricSql(p.Sort, false)} END";
+        var ps = p.Sort is "newest" or "published" ? "0" : $"CASE WHEN HasM THEN {MetricSql(p.SortMetric, true)} ELSE {MetricSql(p.SortMetric, false)} END";
         return $"""
             , base AS (SELECT sg.CaptureId, sg.Host, sg.Raw FROM CaptureSignals sg
                 JOIN SearchCaptures sc ON sc.SearchId = sg.SearchId AND sc.CaptureId = sg.CaptureId
@@ -176,7 +279,9 @@ public sealed partial class SqliteArchiveStore
                 LEFT JOIN PageMetadata m ON m.CaptureId = v.Id
                 LEFT JOIN CaptureSignals sg ON sg.SearchId = $id AND sg.CaptureId = v.Id
                 LEFT JOIN cum ON cum.Host = sg.Host AND cum.Raw = sg.Raw),
-            pm AS (SELECT mm.*, {pm} AS Pm, {ps} AS Ps FROM mm)
+            pm0 AS (SELECT mm.*, {pm} AS Pm, {ps} AS Ps, ({ps}) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Wk,
+                CASE WHEN HasM = 0 THEN 0 WHEN mConf >= 0.5 THEN 2 WHEN mConf >= 0.15 THEN 1 ELSE 0 END AS Tr FROM mm),
+            pm AS (SELECT pm0.*, CUME_DIST() OVER (PARTITION BY Tr ORDER BY Ps) * CASE WHEN HasM THEN 0.5 + 0.5 * COALESCE(mConf, 0) ELSE 1.0 END AS Pk FROM pm0)
             """;
     }
 
@@ -204,11 +309,13 @@ public sealed partial class SqliteArchiveStore
         {
             cte += PopularityCtes(pop);
             from = "pm";
-            if (pop.Sort != "newest") order = "Ps DESC, CaptureTs DESC, Id DESC";
-            if (pop.Metric != "none" && pop.Threshold > 0)
+            if (pop.Sort == "published") order = "CASE WHEN mPub IS NULL THEN 1 ELSE 0 END, mPub DESC, CaptureTs DESC, Id DESC";
+        else if (pop.Sort != "newest") order = pop.Least ? "Tr DESC, Pk ASC, Wk ASC, CaptureTs DESC, Id DESC" : "Tr DESC, Pk DESC, Wk DESC, CaptureTs DESC, Id DESC";   // measured > estimated > archive signal
+            if (pop.Metric != "none" && (pop.Threshold > 0 || pop.MaxThreshold > 0))
             {
-                kept = " WHERE Pm >= $thr";
+                kept = $" WHERE Pm >= $thr AND Tr >= {pop.MinTier}" + (pop.MaxThreshold > 0 ? " AND Pm <= $maxthr" : "");
                 args.Add(("$thr", (long)pop.Threshold));
+                if (pop.MaxThreshold > 0) args.Add(("$maxthr", (long)pop.MaxThreshold));
             }
         }
 
@@ -259,14 +366,27 @@ public sealed partial class SqliteArchiveStore
 
         List<PopularityPreset>? presets = null;
         List<int>? histogram = null;
+        int coverageMeasured = 0, coverageTotal = 0; Dictionary<string, int>? metricCoverage = null;
         if (pop is not null && pop.Metric != "none")
         {
             presets = [];
-            if (everything > 0)
+            using (var cov = Cmd(conn, null, cte + " SELECT COUNT(*), COALESCE(SUM(CASE WHEN Tr >= 2 THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN Tr >= 2 AND mV IS NOT NULL THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN Tr >= 2 AND mL IS NOT NULL THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN Tr >= 2 AND mC IS NOT NULL THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN Tr >= 2 AND mS IS NOT NULL THEN 1 ELSE 0 END), 0) FROM pm"))
+            {
+                Bind(cov, args);
+                using var cr = cov.ExecuteReader();
+                if (cr.Read()) { coverageTotal = Convert.ToInt32(cr.GetValue(0)); coverageMeasured = Convert.ToInt32(cr.GetValue(1)); metricCoverage = new() { ["views"] = Convert.ToInt32(cr.GetValue(2)), ["likes"] = Convert.ToInt32(cr.GetValue(3)), ["comments"] = Convert.ToInt32(cr.GetValue(4)), ["score"] = Convert.ToInt32(cr.GetValue(5)) }; }
+            }
+            int eligible;
+            using (var el = Cmd(conn, null, cte + $" SELECT COUNT(*) FROM pm WHERE Tr >= {pop.MinTier}"))
+            {
+                Bind(el, args);
+                eligible = Convert.ToInt32(el.ExecuteScalar());
+            }
+            if (eligible > 0)
                 foreach (var percent in new[] { 10, 25, 50 })
                 {
-                    var index = Math.Clamp((int)Math.Ceiling(everything * percent / 100.0) - 1, 0, everything - 1);
-                    using var preset = Cmd(conn, null, cte + " SELECT Pm FROM pm ORDER BY Pm DESC LIMIT 1 OFFSET $o");
+                    var index = Math.Clamp((int)Math.Ceiling(eligible * percent / 100.0) - 1, 0, eligible - 1);
+                    using var preset = Cmd(conn, null, cte + $" SELECT Pm FROM pm WHERE Tr >= {pop.MinTier} ORDER BY Pm DESC LIMIT 1 OFFSET $o");
                     Bind(preset, args);
                     preset.Parameters.AddWithValue("$o", index);
                     var value = Convert.ToInt64(preset.ExecuteScalar());
@@ -275,15 +395,15 @@ public sealed partial class SqliteArchiveStore
                 }
 
             var bins = new int[HistogramBuckets];
-            if (everything > 0)
+            if (eligible > 0)
             {
                 long max;
-                using (var maxCmd = Cmd(conn, null, cte + " SELECT MAX(Pm) FROM pm"))
+                using (var maxCmd = Cmd(conn, null, cte + $" SELECT COALESCE(MAX(Pm), 0) FROM pm WHERE Tr >= {pop.MinTier}"))
                 {
                     Bind(maxCmd, args);
                     max = Convert.ToInt64(maxCmd.ExecuteScalar());
                 }
-                using var hist = Cmd(conn, null, cte + $" SELECT CASE WHEN $max <= 0 THEN 0 ELSE MIN({HistogramBuckets - 1}, Pm * {HistogramBuckets} / ($max + 1)) END AS b, COUNT(*) FROM pm GROUP BY b");
+                using var hist = Cmd(conn, null, cte + $" SELECT CASE WHEN $max <= 0 THEN 0 ELSE MIN({HistogramBuckets - 1}, Pm * {HistogramBuckets} / ($max + 1)) END AS b, COUNT(*) FROM pm WHERE Tr >= {pop.MinTier} GROUP BY b");
                 Bind(hist, args);
                 hist.Parameters.AddWithValue("$max", max);
                 using var reader = hist.ExecuteReader();
@@ -320,6 +440,6 @@ public sealed partial class SqliteArchiveStore
 
         var cachedAt = DateTimeOffset.FromUnixTimeMilliseconds(cachedAtMs);
         return new FilteredPage(id, cachedAt, page, total, rows, ReadFacets(conn, id, cachedAtMs, ct), groupSizes, htmlTotal,
-            unsavedTotal, unsavedInView, popularity, everything - total, presets, histogram, pop is null ? 0 : unsavedInView);
+            unsavedTotal, unsavedInView, popularity, everything - total, presets, histogram, pop is null ? 0 : unsavedInView, coverageMeasured, coverageTotal, metricCoverage);
     }
 }

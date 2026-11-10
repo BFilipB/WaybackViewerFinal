@@ -19,7 +19,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         string? pagination = null, int page = 1, int pageSize = 50, string? year = null, string? category = null,
         string? status = null, string? section = null, string? q = null, string? searchMode = null,
         string? type = null, string? unique = null, string? downloadAll = null, string? sort = null,
-                string? popularityMetric = null, int minPopularity = 0, CancellationToken ct = default)
+                string? popularityMetric = null, int minPopularity = 0, bool includeEstimates = false, int maxPopularity = 0, CancellationToken ct = default)
             {
         using var scope = log.BeginScope(new Dictionary<string, object?>
         {
@@ -39,6 +39,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         var popularityMode = NormalizePopularityMetric(popularityMetric);
         var popularityThreshold = popularityMode == "none" ? 0 : Math.Max(0, minPopularity);
         var popularityActive = sortMode != "newest" || popularityMode != "none";
+        _maxPopularity = popularityMode == "none" ? 0 : Math.Max(0, maxPopularity);
         _downloadAllRequested = IsTrue(downloadAll);
 
         if (string.IsNullOrWhiteSpace(url))
@@ -61,12 +62,27 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
                     contentSearch ? null : Clean(q), UrlClassifier.NormalizeKind(type), IsTrue(unique));
                 var fresh = await catalog.TryGetFreshStateAsync(prefix, activeFilter, refresh, ct);
                 var sqlTerm = contentSearch ? ContentTerm(q) : null;
+                var queryStart = System.Diagnostics.Stopwatch.GetTimestamp();
                 var sqlPage = fresh is null ? null : popularityActive
                     ? await store.GetPopularPageAsync(prefix, activeFilter, sqlFilter, page, pageSize, sqlTerm,
-                        new PopularityQuery(sortMode, popularityMode, popularityThreshold), ct)
+                        new PopularityQuery(sortMode, popularityMode, popularityThreshold, includeEstimates, popularityMode == "none" ? 0 : Math.Max(0, maxPopularity)), ct)
                     : await store.GetFilteredPageAsync(prefix, activeFilter, sqlFilter, page, pageSize, sqlTerm, ct);
+                if (fresh is not null)
+                    log.LogInformation("list.query prefix={Prefix} filter={Filter} sort={Sort} metric={Metric} minPop={MinPop} year={Year} category={Category} status={Status} section={Section} type={Type} unique={Unique} text={HasText} content={Content} page={Page} pageSize={PageSize} ms={Ms:F0} total={Total} pageRows={Rows} unsavedInView={UnsavedView} unsavedTotal={UnsavedTotal} popularityPending={Pending} excluded={Excluded}",
+                        prefix, activeFilter, sortMode, popularityMode, popularityThreshold, sqlFilter.Year, sqlFilter.Category, sqlFilter.Status, sqlFilter.Section,
+                        sqlFilter.Kind, sqlFilter.Unique, !string.IsNullOrEmpty(sqlFilter.Text), contentSearch, page, pageSize,
+                        System.Diagnostics.Stopwatch.GetElapsedTime(queryStart).TotalMilliseconds, sqlPage?.Total, sqlPage?.Captures.Count,
+                        sqlPage?.UnsavedHtmlInView, sqlPage?.UnsavedHtmlTotal, sqlPage?.PopularityPending, sqlPage?.PopularityExcluded);
+                if (sqlPage is { Total: 0 })
+                    log.LogInformation("ui.empty_result prefix={Prefix} filter={Filter} sort={Sort} year={Year} category={Category} status={Status} section={Section} type={Type} unique={Unique} text={HasText} content={Content} minPop={MinPop}",
+                        prefix, activeFilter, sortMode, sqlFilter.Year is not null, sqlFilter.Category is not null, sqlFilter.Status is not null, sqlFilter.Section is not null,
+                        sqlFilter.Kind, sqlFilter.Unique, !string.IsNullOrEmpty(sqlFilter.Text), contentSearch, popularityThreshold);
+                else if (page >= 10)
+                    log.LogInformation("ui.deep_page prefix={Prefix} page={Page} pageSize={PageSize} total={Total} sort={Sort}", prefix, page, pageSize, sqlPage?.Total, sortMode);
                 if (fresh is not null && sqlPage is not null)
                 {
+                    if (sortMode == "published") pages.StartPublishedBackfill(prefix, activeFilter);
+                    pages.StartStaleReprocess(prefix, activeFilter);
                     // A content search can only match saved pages, so it keeps saving all of them.
                     var everythingRequested = contentSearch || IsTrue(downloadAll) ||
                         string.Equals(preloadOptions.Value.Scope, "all", StringComparison.OrdinalIgnoreCase);
@@ -94,14 +110,34 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
                         _popularityExcluded = sqlPage.PopularityExcluded;
                         _popularityPresets = sqlPage.Presets is null ? null : [.. sqlPage.Presets];
                         _popularityHistogram = sqlPage.Histogram is null ? null : [.. sqlPage.Histogram];
+                        _coverage = (sqlPage.CoverageMeasured, sqlPage.CoverageTotal); _metricCoverage = sqlPage.MetricCoverage;
                     }
                     return View(WithPopularity(new CaptureListViewModel(prefix, activeFilter, sqlPage.Captures, null,
                         fresh.FromDatabase, sqlPage.CachedAt, mode, Math.Min(sqlPage.Page, sqlPages), pageSize, sqlPage.Total,
                         sqlPage.Facets, contentSearch ? sqlFilter with { Text = ContentTerm(q) } : sqlFilter, modeOfSearch, sqlPage.GroupSizes, hidden, false, sortMode,
-                        popularityMode, popularityThreshold)) with { PopularityPending = popularityActive ? sqlPage.PopularityPending : 0 });
+                        popularityMode, popularityThreshold)) with { IncludeEstimates = includeEstimates, MaxPopularity = popularityMode == "none" ? 0 : Math.Max(0, maxPopularity), PopularityPending = popularityActive ? sqlPage.PopularityPending : 0 });
                 }
             }
-            var result = await catalog.GetAsync(prefix, activeFilter, refresh, ct);
+            log.LogInformation("list.fallback prefix={Prefix} filter={Filter} reason={Reason} sort={Sort} metric={Metric} page={Page}", prefix, activeFilter, mode != "server" ? "pagination_not_server" : "no_fresh_sql_snapshot", sortMode, popularityMode, page);
+            CatalogResult result;
+            // Bounded wait: a slow CDX download must not hold the page open for minutes. The shared in-flight
+            // download keeps running and the load continues as a persisted CaptureLoad operation.
+            using (var wait = CancellationTokenSource.CreateLinkedTokenSource(ct))
+            {
+                var catalogWait = TimeSpan.FromMilliseconds(Math.Max(1, HttpContext.RequestServices.GetRequiredService<IConfiguration>().GetValue("Performance:CatalogWaitMs", 15000)));
+                wait.CancelAfter(catalogWait);
+                try { result = await catalog.GetAsync(prefix, activeFilter, refresh, wait.Token); }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    log.LogInformation("list.load_deferred prefix={Prefix} filter={Filter} waitMs={Wait}", prefix, activeFilter, (long)catalogWait.TotalMilliseconds);
+                    await store.CreateOrGetOperationAsync(prefix, activeFilter, refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad, DateTimeOffset.UtcNow);
+                    loads.Start(prefix, activeFilter, refresh);
+                    return View(new CaptureListViewModel(prefix, activeFilter, [],
+                        "The capture list is still loading from the Wayback Machine. It continues in the background; progress is shown in the workflow timeline. Reload in a moment.",
+                        PaginationMode: mode, PageSize: pageSize, SearchMode: modeOfSearch,
+                        SortMode: sortMode, PopularityMetric: popularityMode, MinPopularity: popularityThreshold));
+                }
+            }
             var hiddenNotSaved = 0;
             var everything = result.Snapshot.Captures;
             var downloadEverything = IsTrue(downloadAll) ||
@@ -148,7 +184,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
                     searched = CaptureFacets.Apply(searched, structural);
                 }
                 if (popularityActive)
-                    searched = await ApplyPopularityAsync(searched, prefix, activeFilter, sortMode, popularityMode, popularityThreshold, ct);
+                    searched = await ApplyPopularityAsync(searched, prefix, activeFilter, sortMode, popularityMode, popularityThreshold, ct, includeEstimates, popularityMode == "none" ? 0 : Math.Max(0, maxPopularity));
                 total = searched.Count;
                 totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
                 page = Math.Clamp(page, 1, totalPages);
@@ -175,7 +211,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
             if (popularityActive)
             {
                 var basis = cf.IsActive ? facetCache.GetOrApply(result.Snapshot, cf).Items : everything;
-                var ranked = await ApplyPopularityAsync(basis, prefix, activeFilter, sortMode, popularityMode, popularityThreshold, ct);
+                var ranked = await ApplyPopularityAsync(basis, prefix, activeFilter, sortMode, popularityMode, popularityThreshold, ct, includeEstimates, popularityMode == "none" ? 0 : Math.Max(0, maxPopularity));
                 total = ranked.Count;
                 totalPages = Math.Max(1, (int)Math.Ceiling(total / (double)pageSize));
                 page = Math.Clamp(page, 1, totalPages);
@@ -212,7 +248,8 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     }
 
     private static string NormalizeSortMode(string? v) =>
-        v?.Trim().ToLowerInvariant() is "popular" or "engaged" or "commented" or "liked" or "viewed" or "score"
+        v?.Trim().ToLowerInvariant() is "published" or "popular" or "engaged" or "commented" or "liked" or "viewed" or "score"
+			or "least-popular" or "least-engaged" or "least-commented" or "least-liked" or "least-viewed" or "least-score"
             ? v.Trim().ToLowerInvariant() : "newest";
 
     private static string NormalizePopularityMetric(string? v) =>
@@ -224,6 +261,9 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     private readonly Dictionary<string, StoredCapture> _popularityPending = new(StringComparer.Ordinal);
     private List<PopularityPreset>? _popularityPresets;
     private List<int>? _popularityHistogram;
+    private (int Measured, int Total) _coverage;
+    private int _maxPopularity;
+    private IReadOnlyDictionary<string, int>? _metricCoverage;
     private int _popularityExcluded;
 
     private async Task<IReadOnlyDictionary<string, PageMetadata>> LoadPopularityMetadataAsync(IReadOnlyList<StoredCapture> captures,
@@ -248,29 +288,73 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     }
 
     private async Task<List<StoredCapture>> ApplyPopularityAsync(IReadOnlyList<StoredCapture> captures, string prefix,
-        string filter, string sortMode, string metric, int threshold, CancellationToken ct)
+        string filter, string sortMode, string metric, int threshold, CancellationToken ct, bool includeEstimates = false, int maxThreshold = 0)
     {
         var metadata = await LoadPopularityMetadataAsync(captures, prefix, filter, ct).ConfigureAwait(false);
         metadata = ArchiveSignals.Fill(captures, metadata);
         IEnumerable<StoredCapture> items = captures;
         if (metric != "none")
         {
-            _popularityPresets = BuildPresets(captures, metadata, metric);
-            _popularityHistogram = BuildHistogram(captures, metadata, metric);
-            if (threshold > 0)
+            _popularityPresets = BuildPresets(captures, metadata, metric, includeEstimates);
+            _popularityHistogram = BuildHistogram(captures, metadata, metric, includeEstimates);
+            _coverage = (captures.Count(c => metadata.TryGetValue(c.Capture.Key, out var m) && m.Tier >= 2), captures.Count);
+            _metricCoverage = new Dictionary<string, int> { ["views"] = CountOf(m => m.Views), ["likes"] = CountOf(m => m.Likes), ["comments"] = CountOf(m => m.Comments), ["score"] = CountOf(m => m.Score) };
+            int CountOf(Func<PageMetadata, long?> pick) => captures.Count(c => metadata.TryGetValue(c.Capture.Key, out var pm) && pm.Tier >= 2 && pick(pm).HasValue);
+            if (threshold > 0 || maxThreshold > 0)
             {
-                var kept = captures.Where(c => GetPopularityMetric(metadata, c, metric) >= threshold).ToList();
+                var kept = captures.Where(c => Eligible(metadata, c, includeEstimates) && GetPopularityMetric(metadata, c, metric) >= threshold && (maxThreshold <= 0 || GetPopularityMetric(metadata, c, metric) <= maxThreshold)).ToList();
                 _popularityExcluded += captures.Count - kept.Count;
                 items = kept;
             }
         }
         if (sortMode == "newest")
             return items.OrderByDescending(c => c.Capture.Timestamp, StringComparer.Ordinal).ThenByDescending(c => c.Id).ToList();
-        return items.OrderByDescending(c => GetPopularityMetric(metadata, c, sortMode))
+        if (sortMode == "published")
+        {
+            DateTimeOffset? PublishedOf(StoredCapture c) => metadata.TryGetValue(c.Capture.Key, out var m) ? m.PublishedAt : null;
+            return items.OrderBy(c => PublishedOf(c).HasValue ? 0 : 1)
+                .ThenByDescending(c => PublishedOf(c))
+                .ThenByDescending(c => c.Capture.Timestamp, StringComparer.Ordinal)
+                .ThenByDescending(c => c.Id)
+                .ToList();
+        }
+        var least = sortMode.StartsWith("least-", StringComparison.Ordinal);
+        var sortMetric = least ? sortMode["least-".Length..] : sortMode;
+        int TierOf(StoredCapture c) => metadata.TryGetValue(c.Capture.Key, out var tm) ? tm.Tier : 0;
+        var pct = Percentiles(items, TierOf, c => GetPopularityMetric(metadata, c, sortMetric));
+        double Pk(StoredCapture c) => pct[c.Id] * (metadata.TryGetValue(c.Capture.Key, out var m) ? 0.5 + 0.5 * m.Confidence : 1.0);
+        var tiered = items.OrderByDescending(TierOf);
+        return (least ? tiered.ThenBy(Pk).ThenBy(c => WeightedKey(metadata, c, sortMetric)) : tiered.ThenByDescending(Pk).ThenByDescending(c => WeightedKey(metadata, c, sortMetric)))
             .ThenByDescending(c => c.Capture.Timestamp, StringComparer.Ordinal)
             .ThenByDescending(c => c.Id)
             .ToList();
     }
+
+    /// Within-tier percentile (SQL CUME_DIST: share of rows with a value <= this one), per capture id.
+    private static Dictionary<long, double> Percentiles(IEnumerable<StoredCapture> items, Func<StoredCapture, int> tier, Func<StoredCapture, long> value)
+    {
+        var result = new Dictionary<long, double>();
+        foreach (var group in items.GroupBy(tier))
+        {
+            var sorted = group.Select(value).OrderBy(v => v).ToArray();
+            foreach (var c in group)
+            {
+                var v = value(c);
+                var lo = 0; var hi = sorted.Length;
+                while (lo < hi) { var mid = (lo + hi) / 2; if (sorted[mid] <= v) lo = mid + 1; else hi = mid; }
+                result[c.Id] = (double)lo / sorted.Length;
+            }
+        }
+        return result;
+    }
+
+    /// Sort key inside a tier: metric * (0.5 + 0.5 * confidence), so equally popular pages rank by how sure the extraction is.
+    private static double WeightedKey(IReadOnlyDictionary<string, PageMetadata> metadata, StoredCapture c, string metric) =>
+        GetPopularityMetric(metadata, c, metric) * (metadata.TryGetValue(c.Capture.Key, out var m) ? 0.5 + 0.5 * m.Confidence : 1.0);
+
+    /// Exact filters count measured pages only; estimates and archive-signal rows join when requested.
+    private static bool Eligible(IReadOnlyDictionary<string, PageMetadata> metadata, StoredCapture capture, bool includeEstimates) =>
+        includeEstimates || (metadata.TryGetValue(capture.Capture.Key, out var m) && m.Tier >= 2);
 
     private static long GetPopularityMetric(IReadOnlyDictionary<string, PageMetadata> metadata, StoredCapture capture, string metric)
     {
@@ -287,9 +371,9 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     }
 
     private static List<PopularityPreset> BuildPresets(IReadOnlyList<StoredCapture> captures,
-        IReadOnlyDictionary<string, PageMetadata> metadata, string metric)
+        IReadOnlyDictionary<string, PageMetadata> metadata, string metric, bool includeEstimates)
     {
-        var values = captures.Select(c => GetPopularityMetric(metadata, c, metric)).OrderByDescending(v => v).ToArray();
+        var values = captures.Where(c => Eligible(metadata, c, includeEstimates)).Select(c => GetPopularityMetric(metadata, c, metric)).OrderByDescending(v => v).ToArray();
         var presets = new List<PopularityPreset>();
         if (values.Length == 0) return presets;
         foreach (var percent in new[] { 10, 25, 50 })
@@ -325,14 +409,18 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
             PopularityExcluded = _popularityExcluded,
             PopularityPending = _popularityPending.Count,
             Presets = _popularityPresets,
-            Histogram = _popularityHistogram
+            Histogram = _popularityHistogram,
+            CoverageMeasured = _coverage.Measured,
+            CoverageTotal = _coverage.Total,
+            MaxPopularity = _maxPopularity,
+            MetricCoverage = _metricCoverage
         };
 
     private static List<int> BuildHistogram(IReadOnlyList<StoredCapture> captures,
-        IReadOnlyDictionary<string, PageMetadata> metadata, string metric)
+        IReadOnlyDictionary<string, PageMetadata> metadata, string metric, bool includeEstimates)
     {
         const int buckets = 10;
-        var values = captures.Select(c => GetPopularityMetric(metadata, c, metric)).ToArray();
+        var values = captures.Where(c => Eligible(metadata, c, includeEstimates)).Select(c => GetPopularityMetric(metadata, c, metric)).ToArray();
         var bins = new int[buckets];
         if (values.Length == 0) return [.. bins];
         var max = values.Max();
@@ -430,7 +518,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     public async Task<IActionResult> CaptureSet(string url, string? filter,
         string? year = null, string? category = null, string? status = null, string? section = null, string? q = null,
         string? searchMode = null, string? type = null, string? unique = null, string? sort = null,
-        string? popularityMetric = null, int minPopularity = 0, CancellationToken ct = default)
+        string? popularityMetric = null, int minPopularity = 0, bool includeEstimates = false, int maxPopularity = 0, CancellationToken ct = default)
     {
         var prefix = UrlInput.NormalizePrefix(url ?? "");
         if (prefix is null) return BadRequest();
@@ -443,7 +531,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         var streamSort = NormalizeSortMode(sort);
         var streamMetric = NormalizePopularityMetric(popularityMetric);
         var streamPopularity = streamSort != "newest" || streamMetric != "none"
-        	? new PopularityQuery(streamSort, streamMetric, streamMetric == "none" ? 0 : Math.Max(0, minPopularity)) : null;
+        	? new PopularityQuery(streamSort, streamMetric, streamMetric == "none" ? 0 : Math.Max(0, minPopularity), includeEstimates, streamMetric == "none" ? 0 : Math.Max(0, maxPopularity)) : null;
 
         // Streamed from SQL one page at a time: memory stays bounded however large the list is.
         var urlText = exportFilter.Text;   // matched per row in C# (SearchTextMatcher); SQL pages stay bounded
@@ -501,7 +589,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         var exportMetric = NormalizePopularityMetric(popularityMetric);
         if (exportSort != "newest" || exportMetric != "none")
             captures = await ApplyPopularityAsync(captures, prefix, activeFilter, exportSort, exportMetric,
-                exportMetric == "none" ? 0 : Math.Max(0, minPopularity), ct);
+                exportMetric == "none" ? 0 : Math.Max(0, minPopularity), ct, includeEstimates, exportMetric == "none" ? 0 : Math.Max(0, maxPopularity));
 
         return Json(captures.Select(c => new
         {
@@ -572,6 +660,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         var prefix = UrlInput.NormalizePrefix(url ?? "");
         if (prefix is null) return BadRequest();
         var activeFilter = UrlInput.NormalizeFilter(filter);
+        var statusStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
         var related = (await store.GetOperationsForSearchAsync(prefix, activeFilter, ct))
             .OrderByDescending(o => o.UpdatedAt)
@@ -620,6 +709,9 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
             ? "Workflow active"
             : timeline.Count > 0 ? "Workflow idle" : "No workflow yet";
 
+        var statusMs = System.Diagnostics.Stopwatch.GetElapsedTime(statusStart).TotalMilliseconds;
+        if (statusMs >= 200)
+            log.LogWarning("workflow.slow prefix={Prefix} filter={Filter} ms={Ms:F0} operations={Ops}", prefix, activeFilter, statusMs, related.Count);
         return Json(new WorkflowStatusView(message, captureBar, preloadBar, timeline, otherUrls));
     }
 
@@ -642,9 +734,10 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         pageSize = NormalizePageSize(pageSize);
         var kind = refresh ? OperationKind.WaybackRefresh : OperationKind.CaptureLoad;
         if (!refresh && await catalog.HasFreshSnapshotAsync(prefix, activeFilter))
-            return Json(new { operationId = (long?)null, cached = true, prefix, filter = activeFilter, refresh, pagination = mode, pageSize, searchMode });
+            { log.LogInformation("search.start prefix={Prefix} filter={Filter} outcome=cached", prefix, activeFilter); return Json(new { operationId = (long?)null, cached = true, prefix, filter = activeFilter, refresh, pagination = mode, pageSize, searchMode }); }
         var operation = await store.CreateOrGetOperationAsync(prefix, activeFilter, kind, DateTimeOffset.UtcNow);
         loads.Start(prefix, activeFilter, refresh);
+        log.LogInformation("search.start prefix={Prefix} filter={Filter} outcome=started kind={Kind} operationId={Id}", prefix, activeFilter, kind, operation.Id);
         return Json(new { operationId = operation.Id, prefix, filter = activeFilter, refresh, pagination = mode, pageSize, searchMode });
     }
 

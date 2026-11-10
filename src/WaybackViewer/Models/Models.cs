@@ -40,8 +40,19 @@ public sealed record PageMetadata(
     string? Tags = null,
     double Confidence = 0)
 {
+    /// Ranking tier: 2 = measured counts (an explicit 0 included), 1 = content estimate, 0 = archive signal only. Mirrors FilteredQueries.
+    public int Tier => Confidence >= 0.5 ? 2 : Confidence >= 0.15 ? 1 : 0;
+
+    /// Log-scaled, weighted engagement (x10, integer): comments 4, likes/score 3, shares 2, views 1. Each signal is
+    /// compressed with ln(1+n) so one huge count (views) cannot drown out discussion. Unknown signals add nothing.
+    public static long Engagement(long? views, long? likes, long? comments, long? shares, long? score)
+    {
+        static double L(long? n) => n is > 0 ? Math.Log(1 + n.Value) : 0;
+        return (long)Math.Round(10 * (L(views) + 3 * L(likes) + 4 * L(comments) + 2 * L(shares) + 3 * L(score)));
+    }
+
     public long EffectiveEngagementScore =>
-        EngagementScore ?? (Score ?? 0) + (Views ?? 0) + (Likes ?? 0) * 3 + (Comments ?? 0) * 4 + (Shares ?? 0) * 2;
+        EngagementScore ?? Engagement(Views, Likes, Comments, Shares, Score);
 }
 
 public sealed record ParsedPage(string? Title, string? Description, string Text, PageMetadata? Metadata = null);
@@ -181,7 +192,12 @@ public sealed record CaptureListViewModel(
     int PopularityPending = 0,
     IReadOnlyList<PopularityPreset>? Presets = null,
     IReadOnlyList<int>? Histogram = null,
-    bool DownloadAll = false)
+    bool DownloadAll = false,
+    bool IncludeEstimates = false,
+    int CoverageMeasured = 0,
+    int CoverageTotal = 0,
+    int MaxPopularity = 0,
+    IReadOnlyDictionary<string, int>? MetricCoverage = null)
 {
     public int TotalPages => Math.Max(1, (int)Math.Ceiling(TotalCaptures / (double)PageSize));
     public bool HasPopularityFilter => !string.Equals(PopularityMetric, "none", StringComparison.OrdinalIgnoreCase) && (MinPopularity ?? 0) > 0;

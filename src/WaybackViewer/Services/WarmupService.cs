@@ -14,12 +14,14 @@ public sealed class WarmupService(IArchiveStore store, FacetCache facetCache, IL
         await Task.Yield();   // return control to the host at once; everything below runs in the background
         try { await WarmAsync(stoppingToken); }
         catch (OperationCanceledException) { }
-        catch (Exception ex) { log.LogDebug(ex, "Warm-up skipped"); }   // purely an optimisation: never a reason to fail
+        catch (Exception ex) { log.LogWarning(ex, "warmup.failed errorType={Type}", ex.GetType().Name); }   // purely an optimisation: never a reason to fail
     }
 
     /// Public so tests can run it directly.
     public async Task WarmAsync(CancellationToken ct = default)
     {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var warmed = 0;
         var operations = await store.GetOperationsAsync(false, ct);
         var recent = operations
             .OrderByDescending(o => o.UpdatedAt)
@@ -31,7 +33,8 @@ public sealed class WarmupService(IArchiveStore store, FacetCache facetCache, IL
         {
             ct.ThrowIfCancellationRequested();
             var snapshot = await store.GetSearchAsync(prefix, filter, ct);
-            if (snapshot is not null) facetCache.GetOrBuild(snapshot);
+            if (snapshot is not null) { facetCache.GetOrBuild(snapshot); warmed++; }
         }
+        log.LogInformation("warmup.done searches={Count} ms={Ms:F0}", warmed, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
     }
 }

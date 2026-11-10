@@ -1,4 +1,7 @@
 using System.Net;
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace WaybackViewer.Services;
@@ -30,20 +33,23 @@ public sealed class ArchiveClient : IArchiveClient
     private readonly HttpClient http;
     private readonly ArchiveOptions options;
     private readonly ITimeSource time;
+    private readonly ILogger log;
     private readonly SemaphoreSlim gate;
     private readonly object paceLock = new();
     private readonly TimeSpan minInterval;
     private readonly TimeSpan maxInterval;
     private TimeSpan interval;
     private DateTime nextRequestUtc = DateTime.MinValue;
+    private DateTime burstUntilUtc = DateTime.MinValue;
     private readonly object inflightLock = new();
     private readonly Dictionary<string, SharedRequest> inflight = new(StringComparer.Ordinal);
 
-    public ArchiveClient(HttpClient http, IOptions<ArchiveOptions> options, ITimeSource time)
+    public ArchiveClient(HttpClient http, IOptions<ArchiveOptions> options, ITimeSource time, ILogger<ArchiveClient>? log = null)
     {
         this.http = http;
         this.options = options.Value;
         this.time = time;
+        this.log = (ILogger?)log ?? NullLogger.Instance;
         gate = new SemaphoreSlim(Math.Max(1, this.options.MaxConcurrency));
         minInterval = TimeSpan.FromMilliseconds(Math.Max(0, this.options.MinIntervalMs));
         maxInterval = TimeSpan.FromMilliseconds(Math.Max(this.options.MinIntervalMs, this.options.MaxIntervalMs));
@@ -101,6 +107,14 @@ public sealed class ArchiveClient : IArchiveClient
         }
     }
 
+    /// Host of the archived page a Wayback URL points at ("cdx" for list queries); logged instead of the full URL.
+    public static string OriginalHost(string url)
+    {
+        if (url.Contains("/cdx/", StringComparison.Ordinal)) return "cdx";
+        var m = System.Text.RegularExpressions.Regex.Match(url, @"/web/\d+[a-z_]*/(?:https?:/{1,2})?([^/?#:]+)");
+        return m.Success ? m.Groups[1].Value.ToLowerInvariant() : "unknown";
+    }
+
     private async Task<string> FetchAsync(string url, CancellationToken ct)
     {
         await gate.WaitAsync(ct).ConfigureAwait(false);
@@ -108,7 +122,12 @@ public sealed class ArchiveClient : IArchiveClient
         {
             for (var attempt = 1; ; attempt++)
             {
+                var waitStart = Stopwatch.GetTimestamp();
                 await WaitForSlotAsync(ct).ConfigureAwait(false);
+                var waitMs = Stopwatch.GetElapsedTime(waitStart).TotalMilliseconds;
+                var kind = url.Contains("/cdx/", StringComparison.Ordinal) ? "cdx" : "page";
+                var dlStart = Stopwatch.GetTimestamp();
+                var host = OriginalHost(url);
 
                 HttpResponseMessage response;
                 try
@@ -118,6 +137,8 @@ public sealed class ArchiveClient : IArchiveClient
                 catch (Exception ex) when (IsNetworkFailure(ex, ct) && attempt < options.MaxAttempts)
                 {
                     OnRateLimited();   // connection refused / reset / timeout: the archive is usually throttling us
+                    log.LogWarning(ex, "archive.network_failure kind={Kind} host={Host} attempt={Attempt}/{Max} waitMs={WaitMs:F0} dlMs={DlMs:F0} intervalMs={IntervalMs:F0}",
+                        kind, host, attempt, options.MaxAttempts, waitMs, Stopwatch.GetElapsedTime(dlStart).TotalMilliseconds, CurrentInterval.TotalMilliseconds);
                     await time.DelayAsync(Backoff(attempt, null), ct).ConfigureAwait(false);
                     continue;
                 }
@@ -127,12 +148,18 @@ public sealed class ArchiveClient : IArchiveClient
                     if (response.IsSuccessStatusCode)
                     {
                         OnSuccess();
-                        return await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                        log.LogDebug("archive.fetch kind={Kind} host={Host} status={Status} attempt={Attempt} waitMs={WaitMs:F0} dlMs={DlMs:F0} chars={Chars} intervalMs={IntervalMs:F0}",
+                            kind, host, (int)response.StatusCode, attempt, waitMs, Stopwatch.GetElapsedTime(dlStart).TotalMilliseconds, body.Length, CurrentInterval.TotalMilliseconds);
+                        return body;
                     }
 
                     var code = (int)response.StatusCode;
                     var retryable = code is 408 or 429 || code >= 500;
                     if (code == 429) OnRateLimited();
+                    log.LogWarning("archive.http_error kind={Kind} host={Host} status={Status} attempt={Attempt}/{Max} retryAfterMs={RetryAfterMs:F0} dlMs={DlMs:F0} intervalMs={IntervalMs:F0} willRetry={Retry}",
+                        kind, host, code, attempt, options.MaxAttempts, RetryAfter(response)?.TotalMilliseconds ?? 0,
+                        Stopwatch.GetElapsedTime(dlStart).TotalMilliseconds, CurrentInterval.TotalMilliseconds, retryable && attempt < options.MaxAttempts);
                     if (!retryable || attempt >= options.MaxAttempts)
                         throw new ArchiveRequestException(response.StatusCode, RetryAfter(response));
 
@@ -166,8 +193,11 @@ public sealed class ArchiveClient : IArchiveClient
     {
         lock (paceLock)
         {
-            var faster = TimeSpan.FromTicks((long)(interval.Ticks * 0.9));
+            var before = interval;
+            var faster = TimeSpan.FromTicks((long)(interval.Ticks * 0.75));
             interval = faster > minInterval ? faster : minInterval;
+            if (before > minInterval && interval == minInterval)
+                log.LogInformation("archive.pacing change=recovered intervalMs={Ms:F0}", interval.TotalMilliseconds);
         }
     }
 
@@ -175,10 +205,14 @@ public sealed class ArchiveClient : IArchiveClient
     {
         lock (paceLock)
         {
+            // One back-off per burst: 429s that arrive while the pause from the previous one is still running are ignored.
+            if (time.UtcNow < burstUntilUtc) return;
             var slower = TimeSpan.FromTicks(Math.Max(interval.Ticks, TimeSpan.FromSeconds(1).Ticks) * 2);
             interval = slower < maxInterval ? slower : maxInterval;
             var pauseUntil = time.UtcNow + interval;
             if (nextRequestUtc < pauseUntil) nextRequestUtc = pauseUntil;
+            burstUntilUtc = pauseUntil;
+            log.LogWarning("archive.pacing change=slowed intervalMs={Ms:F0} pauseMs={Pause:F0} atMax={AtMax}", interval.TotalMilliseconds, interval.TotalMilliseconds, interval == maxInterval);
         }
     }
 

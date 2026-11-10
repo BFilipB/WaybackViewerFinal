@@ -29,7 +29,19 @@ public sealed partial class SqliteArchiveStore
         index.ExecuteNonQuery();
     }
 
-    /// Classifies captures saved since the last pass, in bounded batches.
+	/// Idempotent: older databases get the ExtractorVersion column (NULL = saved by an unversioned extractor).
+	private static void EnsureMetadataVersionColumn(SqliteConnection conn)
+	{
+		var has = false;
+		using (var info = Cmd(conn, null, "PRAGMA table_info(PageMetadata)"))
+		using (var r = info.ExecuteReader())
+			while (r.Read()) has |= string.Equals(r.GetString(1), "ExtractorVersion", StringComparison.OrdinalIgnoreCase);
+		if (has) return;
+		using var alter = Cmd(conn, null, "ALTER TABLE PageMetadata ADD COLUMN ExtractorVersion INTEGER");
+		alter.ExecuteNonQuery();
+	}
+
+	/// Classifies captures saved since the last pass, in bounded batches.
     private static void ClassifyPending(SqliteConnection conn, CancellationToken ct)
     {
         while (true)
@@ -76,12 +88,14 @@ public sealed partial class SqliteArchiveStore
             return cmd.ExecuteScalar() is not null;
         }, ct).ConfigureAwait(false);
         if (!pending) return;
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
         await WriteAsync(() =>
         {
             using var conn = Open();
             ClassifyPending(conn, ct);
             return 0;
         }, ct).ConfigureAwait(false);
+        Log?.LogInformation("classify.pending done ms={Ms:F0}", System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds);
     }
 
     private const string RankedColumns = """
@@ -163,8 +177,13 @@ public sealed partial class SqliteArchiveStore
     public async Task<FilteredPage?> GetFilteredPageAsync(string prefix, string filter, CaptureFilter f, int page, int pageSize,
         string? contentTerm = null, CancellationToken ct = default)
     {
-        await EnsureClassifiedAsync(ct).ConfigureAwait(false);
-        return await Task.Run(() => ReadFilteredPage(prefix, filter, f, page, Math.Max(1, pageSize), contentTerm, ct), ct).ConfigureAwait(false);
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+		await EnsureClassifiedAsync(ct).ConfigureAwait(false);
+		var ensureMs = System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+		var result = await Task.Run(() => ReadFilteredPage(prefix, filter, f, page, Math.Max(1, pageSize), contentTerm, ct), ct).ConfigureAwait(false);
+		Log?.LogInformation("store.read_page kind=filtered ensureMs={Ensure:F0} readMs={Read:F0} total={Total}",
+			ensureMs, System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds - ensureMs, result?.Total);
+		return result;
     }
 
     // ReadFilteredPage lives in SqliteArchiveStore.Popularity.cs

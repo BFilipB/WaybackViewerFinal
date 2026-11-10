@@ -1,4 +1,4 @@
-﻿@model CaptureListViewModel
+@model CaptureListViewModel
 @{
     ViewData["Title"] = "Wayback Viewer";
     var readyCount = Model.Captures.Count(c => c.Ready);
@@ -12,6 +12,7 @@
         {
             s += "&amp;popularityMetric=" + Uri.EscapeDataString(Model.PopularityMetric);
             s += "&amp;minPopularity=" + Model.MinPopularity;
+            if (Model.IncludeEstimates) s += "&amp;includeEstimates=true";
         }
         if (year is not null) s += "&amp;year=" + Uri.EscapeDataString(year);
         if (cat is not null) s += "&amp;category=" + Uri.EscapeDataString(cat);
@@ -32,6 +33,9 @@
         kind == "type" ? (act.Kind == value ? null : value) : act.Kind,
         act.Unique);
     string ToggleUnique() => Qs(1, act.Year, act.Category, act.Status, act.Section, act.Kind, !act.Unique);
+    // A metric nobody has measured in this view cannot filter anything: disable it (never when it is the active choice).
+    bool NoCoverage(string metric) => Model.MetricCoverage is not null && Model.CoverageTotal > 0 && Model.PopularityMetric != metric && Model.MetricCoverage.TryGetValue(metric, out var n) && n == 0;
+
     string ResetPopularityLink()
     {
         var s = Qs(1, act.Year, act.Category, act.Status, act.Section, act.Kind, act.Unique);
@@ -79,16 +83,24 @@
     <option value="liked" selected="@(Model.SortMode == "liked" ? "selected" : null)">Most liked</option>
     <option value="viewed" selected="@(Model.SortMode == "viewed" ? "selected" : null)">Most viewed</option>
     <option value="score" selected="@(Model.SortMode == "score" ? "selected" : null)">Highest score</option>
+    <option value="least-popular" selected="@(Model.SortMode == "least-popular" ? "selected" : null)">Least popular</option>
+    <option value="least-engaged" selected="@(Model.SortMode == "least-engaged" ? "selected" : null)">Least engaged</option>
+    <option value="least-commented" selected="@(Model.SortMode == "least-commented" ? "selected" : null)">Least commented</option>
+    <option value="least-liked" selected="@(Model.SortMode == "least-liked" ? "selected" : null)">Least liked</option>
+    <option value="least-viewed" selected="@(Model.SortMode == "least-viewed" ? "selected" : null)">Least viewed</option>
+    <option value="least-score" selected="@(Model.SortMode == "least-score" ? "selected" : null)">Lowest score</option>
   </select>
   <select name="popularityMetric" aria-label="Popularity filter metric">
     <option value="none" selected="@(Model.PopularityMetric == "none" ? "selected" : null)">No popularity filter</option>
-    <option value="views" selected="@(Model.PopularityMetric == "views" ? "selected" : null)">Min views</option>
-    <option value="likes" selected="@(Model.PopularityMetric == "likes" ? "selected" : null)">Min likes</option>
-    <option value="comments" selected="@(Model.PopularityMetric == "comments" ? "selected" : null)">Min comments</option>
+    <option value="views" selected="@(Model.PopularityMetric == "views" ? "selected" : null)" disabled="@(NoCoverage("views") ? "disabled" : null)">Min views@(NoCoverage("views") ? " (no data)" : "")</option>
+    <option value="likes" selected="@(Model.PopularityMetric == "likes" ? "selected" : null)" disabled="@(NoCoverage("likes") ? "disabled" : null)">Min likes@(NoCoverage("likes") ? " (no data)" : "")</option>
+    <option value="comments" selected="@(Model.PopularityMetric == "comments" ? "selected" : null)" disabled="@(NoCoverage("comments") ? "disabled" : null)">Min comments@(NoCoverage("comments") ? " (no data)" : "")</option>
     <option value="engaged" selected="@(Model.PopularityMetric == "engaged" ? "selected" : null)">Min engagement</option>
-    <option value="score" selected="@(Model.PopularityMetric == "score" ? "selected" : null)">Min score</option>
+    <option value="score" selected="@(Model.PopularityMetric == "score" ? "selected" : null)" disabled="@(NoCoverage("score") ? "disabled" : null)">Min score@(NoCoverage("score") ? " (no data)" : "")</option>
   </select>
   <input type="number" name="minPopularity" min="0" step="1" value="@(Model.MinPopularity ?? 0)" aria-label="Minimum popularity value" placeholder="0" />
+  <input type="number" name="maxPopularity" min="0" step="1" value="@(Model.MaxPopularity > 0 ? Model.MaxPopularity.ToString() : "")" aria-label="Maximum popularity value" placeholder="max" />
+  <label title="Exact filters count measured pages only. Tick to add estimated (~) pages."><input type="checkbox" name="includeEstimates" value="true" @(Model.IncludeEstimates ? "checked" : null) /> include estimates</label>
   <input id="queryInput" name="q" value="@act.Text" size="28" placeholder="Optional filter keywords" aria-label="Search captures" />
   <button id="applyTextFilter" type="button" title="Apply current search text/mode to the current capture list">Apply filter</button>
   <span id="filterDirtyBadge" class="dirty-indicator" hidden>Unapplied filter changes</span>
@@ -152,6 +164,10 @@ else if (Model.CachedAt is not null)
     <a href="@Html.Raw(ResetPopularityLink())">Reset sort and popularity filter</a>
   </p>
 }
+@if (Model.Error is null && !string.IsNullOrEmpty(Model.Url) && Model.PopularityMetric != "none" && Model.CoverageTotal > 0)
+{
+  <p class="cache-info popularity-coverage" data-measured="@Model.CoverageMeasured" data-total="@Model.CoverageTotal">Measured counts on @Model.CoverageMeasured of @Model.CoverageTotal captures (@((int)Math.Round(100.0 * Model.CoverageMeasured / Model.CoverageTotal))%).@(Model.CoverageMeasured == 0 ? " Nothing measured here: tick include estimates to rank by estimates." : "")</p>
+}
 @if (Model.Error is null && !string.IsNullOrEmpty(Model.Url) && Model.PopularityMetric != "none" && Model.Presets is { Count: > 0 })
 {
   <p class="cache-info popularity-presets" role="group" aria-label="Popularity presets">
@@ -164,7 +180,7 @@ else if (Model.CachedAt is not null)
 }
 @if (Model.Error is null && !string.IsNullOrEmpty(Model.Url) && Model.PopularityPending > 0 && (Model.SortMode != "newest" || Model.PopularityMetric != "none"))
 {
-  <p id="popularityPending" class="cache-info popularity-pending" role="status">@Model.PopularityPending pages have no popularity data yet. They are being downloaded in the background and counted as 0 until then; this notice updates when the downloads finish.</p>
+  <p id="popularityPending" class="cache-info popularity-pending" role="status">@Model.PopularityPending pages have no popularity data yet. They are being downloaded in the background and ranked after pages with known counts until then; this notice updates when the downloads finish.</p>
 }
 @if (Model.Error is null && !string.IsNullOrEmpty(Model.Url) && Model.PopularityMetric != "none" && Model.Histogram is { Count: > 0 })
 {
@@ -186,7 +202,7 @@ else if (Model.CachedAt is not null)
 }
 @if (Model.Captures.Count == 0 && Model.HasPopularityFilter)
 {
-  <p class="empty-state">No captures reach @Model.MinPopularity @Model.PopularityMetric. Lower the minimum or reset the filter.@(Model.PopularityPending > 0 ? $" {Model.PopularityPending} pages are still being saved in the background, so try again shortly." : "")</p>
+  <p class="empty-state">No captures reach @Model.MinPopularity @Model.PopularityMetric. Lower the minimum or <a href="@Html.Raw(ResetPopularityLink())">reset the filter</a>.@(Model.Presets is { Count: > 0 } ? " Try the quick filter: " : "")@if (Model.Presets is { Count: > 0 }) { var best = Model.Presets[0]; <a class="btn" href="@Html.Raw(PresetLink(best.Value))">Top @(best.Percent)% (&ge; @best.Value)</a> }@(Model.PopularityPending > 0 ? $" {Model.PopularityPending} pages are still being saved in the background, so try again shortly." : "")</p>
 }
 
 @if (Model.Captures.Count > 0)
@@ -299,12 +315,13 @@ else if (Model.CachedAt is not null)
       <div class="capture-details"><span class="kind kind-@info.Kind.ToLowerInvariant()">@info.Kind</span> Status @c.Capture.StatusCode &middot; @c.Capture.MimeType@if (folded > 0) { <span class="folded" title="Saved links that show the same thread/post/page and are hidden by 'One per thread / post'"> &middot; +@(folded - 1) more saved links</span> }</div>
       @if (Model.Popularity is not null && Model.Popularity.TryGetValue(c.Capture.Key, out var pm))
       {
-        <div class="popularity-badges">
-          @if (pm.Views is { } v) { <span title="Views">&#128065; @v</span> }
-          @if (pm.Likes is { } l) { <span title="Likes">&#128077; @l</span> }
-          @if (pm.Comments is { } cm) { <span title="Comments">&#128172; @cm</span> }
-          @if (pm.Shares is { } sh) { <span title="Shares">&#128257; @sh</span> }
-          @if (pm.Score is { } sc) { <span title="Score">&#11088; @sc</span> }
+        <div class="popularity-badges" title="@(pm.Tier == 2 ? "Measured: counts were read from the saved page." : pm.Tier == 1 ? "Estimated (~): no counts found, inferred from page content." : "Archive signal only: how often and how widely this was archived, relative to its site.")">
+          <span class="conf conf-@(pm.Tier == 2 ? "high" : pm.Tier == 1 ? "med" : "low")" title="Confidence">@(pm.Tier == 2 ? "High" : pm.Tier == 1 ? "Med" : "Low")</span>
+          @if (pm.Views is { } v) { <span title="Views">&#128065; @(pm.Tier < 2 ? "~" : "")@v</span> }
+          @if (pm.Likes is { } l) { <span title="Likes">&#128077; @(pm.Tier < 2 ? "~" : "")@l</span> }
+          @if (pm.Comments is { } cm) { <span title="Comments">&#128172; @(pm.Tier < 2 ? "~" : "")@cm</span> }
+          @if (pm.Shares is { } sh) { <span title="Shares">&#128257; @(pm.Tier < 2 ? "~" : "")@sh</span> }
+          @if (pm.Score is { } sc) { <span title="Score">&#11088; @(pm.Tier < 2 ? "~" : "")@sc</span> }
           @if (pm.Views is null && pm.Likes is null && pm.Comments is null && pm.Shares is null && pm.Score is null && pm.EffectiveEngagementScore > 0) { <span title="No counts found on this page: rough estimate from how often it was archived and how much sits beneath it, relative to its own site">&asymp; est. @pm.EffectiveEngagementScore</span> }
         </div>
       }
@@ -770,7 +787,7 @@ else if (Model.CachedAt is not null)
     params.set('url', url);
     params.set('filter', q.get('filter') || searchBar?.querySelector('[name=filter]')?.value || 'html200');
     params.set('searchMode', q.get('searchMode') || searchBar?.querySelector('[name=searchMode]')?.value || 'url');
-    ['year','category','status','section','q','type','unique','sort','popularityMetric','minPopularity'].forEach(k => { const v = q.get(k); if (v) params.set(k, v); });
+    ['year','category','status','section','q','type','unique','sort','popularityMetric','minPopularity','maxPopularity','includeEstimates'].forEach(k => { const v = q.get(k); if (v) params.set(k, v); });
     const r = await fetch('/Home/CaptureSet?' + params.toString());
 
 
@@ -941,6 +958,8 @@ else if (Model.CachedAt is not null)
       sort: searchBar?.querySelector('[name=sort]')?.value || 'newest',
       popularityMetric: searchBar?.querySelector('[name=popularityMetric]')?.value || 'none',
       minPopularity: searchBar?.querySelector('[name=minPopularity]')?.value || '0',
+        includeEstimates: searchBar?.querySelector('[name=includeEstimates]')?.checked ? 'true' : '',
+        maxPopularity: searchBar?.querySelector('[name=maxPopularity]')?.value || '0',
       q: queryInput?.value || ''
     };
   }
@@ -957,6 +976,9 @@ else if (Model.CachedAt is not null)
       params.set('popularityMetric', payload.popularityMetric);
       const min = Number(payload.minPopularity || 0);
       if (Number.isFinite(min) && min > 0) params.set('minPopularity', String(min));
+        if (payload.includeEstimates) params.set('includeEstimates', 'true');
+    const maxPop = Number(payload.maxPopularity || 0);
+    if (Number.isFinite(maxPop) && maxPop > 0) params.set('maxPopularity', String(maxPop));
     }
     if ((payload.q || '').trim()) params.set('q', payload.q.trim());
     // Facets and the download scope belong to the list being viewed: keep them while the same list is re-queried,

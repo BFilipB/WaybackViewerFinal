@@ -74,6 +74,28 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
         this.store = store;
         this.options = options.Value;
         this.log = log;
+        var guardPath = string.IsNullOrWhiteSpace(this.options.DiskGuardPath) ? AppContext.BaseDirectory : this.options.DiskGuardPath;
+        FreeDiskBytes = () =>
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(guardPath));
+            return string.IsNullOrEmpty(root) ? null : new DriveInfo(root).AvailableFreeSpace;
+        };
+    }
+
+    /// Returns the free bytes on the payload drive, or null when unknown. Replaceable in tests.
+    public Func<long?> FreeDiskBytes { get; set; } = () => null;
+    private long nextDiskCheckTicks;
+
+    private bool LowOnDisk()
+    {
+        if (options.MinFreeDiskMb <= 0) return false;
+        var now = Environment.TickCount64;
+        if (now < Interlocked.Read(ref nextDiskCheckTicks)) return false;
+        Interlocked.Exchange(ref nextDiskCheckTicks, now + 5_000);
+        var free = FreeDiskBytes();
+        if (free is null || free.Value >= options.MinFreeDiskMb * 1024L * 1024L) return false;
+        log.LogWarning("preload.disk-low free={FreeMb}MB min={MinMb}MB; pausing preload jobs", free.Value / 1024 / 1024, options.MinFreeDiskMb);
+        return true;
     }
 
     /// Queues every HTML capture that is not saved yet, without an operation. Returns how many were newly queued.
@@ -531,13 +553,19 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
                 inFlight[item.Capture.Key] = item.JobKey;
             }
 
+            if (LowOnDisk())
+                Pause();
+
             await WaitIfPausedAsync(item.JobKey).ConfigureAwait(false);
 
             NewPage page;
-            try
-            {
-                page = await loader.LoadAsync(item.Capture, cts.Token).ConfigureAwait(false);
-            }
+			var downloadStart = Stopwatch.GetTimestamp();
+			try
+			{
+				page = await loader.LoadAsync(item.Capture, cts.Token).ConfigureAwait(false);
+				log.LogDebug("preload.download key={Key} host={Host} ms={Ms:F0} htmlGzBytes={Bytes}", item.Capture.Key, HostOf(item.Capture.Original),
+					Stopwatch.GetElapsedTime(downloadStart).TotalMilliseconds, page.HtmlGz.Length);
+			}
             catch (OperationCanceledException) when (cts.IsCancellationRequested)
             {
                 AbandonLocked(item);   // shutting down: stays pending in the database
@@ -571,6 +599,9 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
         }
     }
 
+    private static string HostOf(string original) =>
+        Uri.TryCreate(original, UriKind.Absolute, out var u) ? u.Host.ToLowerInvariant() : "unknown";
+
     private void AbandonLocked(PendingCapture item)
     {
         lock (gate)
@@ -593,8 +624,8 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
             if (attempt < Math.Max(1, options.MaxAttempts))
             {
                 var delay = RetryDelay(attempt, retryAfter);
-                log.LogInformation("Preload of {Key} failed temporarily ({Reason}), attempt {Attempt}; retrying in {Delay}",
-                    key, reason, attempt, delay);
+                log.LogInformation("preload.retry key={Key} host={Host} reason={Reason} attempt={Attempt} delayMs={Delay:F0}",
+                    key, HostOf(item.Capture.Original), reason, attempt, delay.TotalMilliseconds);
                 lock (gate)
                 {
                     inFlight.Remove(key);
@@ -608,9 +639,9 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
 
         var outcome = kind == FailureKind.Skip ? PreloadOutcome.Skipped : PreloadOutcome.Failed;
         if (outcome == PreloadOutcome.Failed)
-            log.LogWarning(ex, "Preload of {Key} failed permanently ({Reason})", key, reason);
+            log.LogWarning(ex, "preload.failed key={Key} host={Host} reason={Reason} kind={Kind}", key, HostOf(item.Capture.Original), reason, kind);
         else
-            log.LogInformation("Preload of {Key} skipped ({Reason})", key, reason);
+            log.LogInformation("preload.skipped key={Key} host={Host} reason={Reason}", key, HostOf(item.Capture.Original), reason);
 
         attempts.TryRemove(key, out _);
         await TryQueueSaveAsync(new SaveItem(null, new CaptureOutcome(item.Capture, outcome, reason, DateTimeOffset.UtcNow),
@@ -718,17 +749,32 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
 
     /// Writes one batch. A failing database write is retried (with backoff) until it succeeds or the app stops;
     /// it never turns downloaded pages into failed captures.
-    private async Task FlushAsync(SaveItem[] batch)
+    private long summaryTicks = Stopwatch.GetTimestamp();
+	private int summaryPages;
+
+	private async Task FlushAsync(SaveItem[] batch)
     {
         var pages = batch.Where(i => i.Page is not null).Select(i => i.Page!).ToArray();
         var outcomes = batch.Where(i => i.Outcome is not null).Select(i => i.Outcome!).ToArray();
 
+        var flushStart = Stopwatch.GetTimestamp();
         for (var attempt = 1; ; attempt++)
         {
             try
             {
                 if (pages.Length > 0) await store.SavePagesAsync(pages, CancellationToken.None).ConfigureAwait(false);
                 if (outcomes.Length > 0) await store.SaveOutcomesAsync(outcomes, CancellationToken.None).ConfigureAwait(false);
+                log.LogInformation("preload.flush pages={Pages} outcomes={Outcomes} attempt={Attempt} ms={Ms:F0} saveQueue={Queue} activeWorkers={Workers}",
+                    pages.Length, outcomes.Length, attempt, Stopwatch.GetElapsedTime(flushStart).TotalMilliseconds, saveQueue.Reader.Count, activeWorkers);
+				summaryPages += pages.Length;
+				if (Stopwatch.GetElapsedTime(summaryTicks).TotalSeconds >= 10)
+				{
+					var secs = Stopwatch.GetElapsedTime(summaryTicks).TotalSeconds;
+					log.LogInformation("preload.summary savedPerSec={Rate:F2} total={Total} completed={Completed} failed={Failed} skipped={Skipped} activeWorkers={Workers} unsaved={Unsaved} saveQueue={Queue}",
+						summaryPages / secs, total, completed, failed, skipped, activeWorkers, unsaved, saveQueue.Reader.Count);
+					summaryPages = 0;
+					summaryTicks = Stopwatch.GetTimestamp();
+				}
                 break;
             }
             catch (Exception ex) when (options.SaveMaxAttempts > 0 && attempt >= options.SaveMaxAttempts)
@@ -859,7 +905,17 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
             state = job.Operation.State;
         }
         var preloadable = Math.Max(0, job.HtmlCount - job.Skipped);
-        job.Operation = job.Operation with
+		if (state != job.Operation.State)
+			log.LogInformation("operation.state id={Id} kind={Kind} {From}->{To} prefix={Prefix} filter={Filter} total={Total} saved={Saved} failed={Failed} skipped={Skipped}",
+				job.Operation.Id, job.Operation.Kind, job.Operation.State, state, job.Operation.Prefix, job.Operation.Filter, preloadable, job.Saved, job.Failed, job.Skipped);
+		if (state != job.Operation.State && state is OperationState.Completed or OperationState.CompletedWithFailures or OperationState.Failed)
+{
+var secs = Stopwatch.GetElapsedTime(job.StartTicks).TotalSeconds;
+log.LogInformation("operation.summary id={Id} kind={Kind} state={State} prefix={Prefix} filter={Filter} total={Total} saved={Saved} failed={Failed} skipped={Skipped} elapsedSec={Elapsed:F0} avgPerSec={Rate:F2}",
+job.Operation.Id, job.Operation.Kind, state, job.Operation.Prefix, job.Operation.Filter, preloadable, job.Saved, job.Failed, job.Skipped,
+secs, secs > 0 ? (job.Saved - job.SavedAtStart) / secs : 0);
+}
+job.Operation = job.Operation with
         {
             State = state,
             UpdatedAt = DateTimeOffset.UtcNow,

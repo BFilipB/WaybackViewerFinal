@@ -12,7 +12,7 @@ public sealed record ImportReport(int Files, int CaptureLists, int Captures, int
 /// One-time migration of the old App_Data/wayback-cache/*.json files (v1 file cache) into the database.
 /// Old entries are named sha256("html|timestamp|url").json, so each capture listed in a saved capture list
 /// can be matched to its file even though the file itself does not contain the key.
-public sealed class LegacyCacheImporter(IArchiveStore store)
+public sealed class LegacyCacheImporter(IArchiveStore store, ILogger<LegacyCacheImporter>? logger = null)
 {
     private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
 
@@ -23,6 +23,7 @@ public sealed class LegacyCacheImporter(IArchiveStore store)
     {
         if (!Directory.Exists(directory)) throw new DirectoryNotFoundException($"Folder not found: {directory}");
 
+        var importStart = System.Diagnostics.Stopwatch.GetTimestamp();
         var files = Directory.EnumerateFiles(directory, "*.json").ToList();
         var names = new HashSet<string>(files.Select(f => Path.GetFileName(f)), StringComparer.OrdinalIgnoreCase);
 
@@ -71,6 +72,8 @@ public sealed class LegacyCacheImporter(IArchiveStore store)
             imported += batch.Count;
         }
 
+        logger?.LogInformation("import.done files={Files} lists={Lists} captures={Captures} imported={Imported} invalid={Invalid} missing={Missing} ms={Ms:F0}",
+            files.Count, lists, captures.Count, imported, invalid, missing, System.Diagnostics.Stopwatch.GetElapsedTime(importStart).TotalMilliseconds);
         return new ImportReport(files.Count, lists, captures.Count, imported, invalid, missing);
     }
 

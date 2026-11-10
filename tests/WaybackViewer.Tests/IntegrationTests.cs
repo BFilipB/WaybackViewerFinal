@@ -28,7 +28,8 @@ public sealed class AppHost : IAsyncDisposable
             ["Storage:Provider"] = "Memory",
             ["Preload:Workers"] = "3",
             ["Preload:WriteMaxDelayMs"] = "20",
-            ["Logging:LogLevel:Default"] = "Warning"
+            ["Logging:LogLevel:Default"] = "Warning",
+            ["Logging:File:Directory"] = ""   // tests must never write into the real log folder
         };
         if (extraConfig is not null) foreach (var kv in extraConfig) config[kv.Key] = kv.Value;
         var app = AppBuilder.Build(
@@ -229,9 +230,9 @@ public class HomePageTests
         await host.Store!.SaveSearchAsync("example.com/", "html200", captures, DateTimeOffset.UtcNow);
         await host.Store.SavePagesAsync([
             new NewPage(captures[0], HtmlCodec.Compress("<html><head><meta property=\"og:likes\" content=\"10\"></head><body>first</body></html>"),
-                new ParsedPage("first", null, "first", new PageMetadata(Likes: 10)), DateTimeOffset.UtcNow),
+                new ParsedPage("first", null, "first", new PageMetadata(Likes: 10, Confidence: 0.6)), DateTimeOffset.UtcNow),
             new NewPage(captures[1], HtmlCodec.Compress("<html><head><meta property=\"og:likes\" content=\"20\"></head><body>second</body></html>"),
-                new ParsedPage("second", null, "second", new PageMetadata(Likes: 20)), DateTimeOffset.UtcNow)
+                new ParsedPage("second", null, "second", new PageMetadata(Likes: 20, Confidence: 0.6)), DateTimeOffset.UtcNow)
         ]);
 
         var html = await host.GetAsync("/?url=example.com/&sort=liked&popularityMetric=likes&minPopularity=15");
@@ -260,7 +261,7 @@ public class HomePageTests
         var pages = new List<NewPage>();
         for (var i = 0; i < 3; i++)
             pages.Add(new NewPage(caps[i], HtmlCodec.Compress("<html><body>p" + i + "</body></html>"),
-                new ParsedPage("p" + i, null, "p" + i, new PageMetadata(Likes: likes[i])), DateTimeOffset.UtcNow));
+                new ParsedPage("p" + i, null, "p" + i, new PageMetadata(Likes: likes[i], Confidence: 0.6)), DateTimeOffset.UtcNow));
         await host.Store.SavePagesAsync(pages);
         return (host, caps);
     }
@@ -830,11 +831,20 @@ public class SqlitePersistenceTests : IDisposable
 public class DatabasePathTests
 {
     [Fact]
-    public void Relative_paths_go_to_the_local_app_data_folder()
+    public void Relative_paths_go_under_the_data_root()
     {
-        var path = AppBuilder.ResolveDatabasePath("wayback.db");
-        Assert.True(Path.IsPathRooted(path));
-        Assert.EndsWith(Path.Combine("WaybackViewer", "wayback.db"), path);
+        var root = Path.Combine(Path.GetTempPath(), "wbv-root");
+        var path = AppBuilder.ResolveDatabasePath("wayback.db", root);
+        Assert.Equal(Path.Combine(root, "WaybackViewer", "wayback.db"), path);
+    }
+
+    [Fact]
+    public void Missing_data_drive_fails_clearly_and_creates_nothing()
+    {
+        var missing = Enumerable.Range('D', 23).Select(c => $"{(char)c}:\\").First(d => !Directory.Exists(d));
+        var ex = Assert.Throws<InvalidOperationException>(() => AppBuilder.ResolveDatabasePath("wayback.db", missing));
+        Assert.Contains("not available", ex.Message);
+        Assert.False(Directory.Exists(missing));
     }
 
     [Theory]

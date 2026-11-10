@@ -12,17 +12,37 @@ public static partial class PopularityEstimator
     private const int ScanChars = 200_000;
     private const int MaxMatchesPerKind = 64;
 
-    [GeneratedRegex(@"(?<n>\d[\d,\.]*\s?[kKmM]?)\s*(?<w>views?|comments?|replies|reply|likes?|upvotes?|points?|votes?|shares?|reposts?)(?![a-zA-Z])",
-        RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 250)]
+    [GeneratedRegex(@"(?<n>\d[\d,\.]*\s?[kKmM]?)\s*(?<w>views?|visninger|aufrufe|visitas|vues|pregleda|pregledi|comments?|replies|reply|svar|kommentarer|kommentare|comentarios|commentaires|odgovora|odgovori|odgovor|antworten|likes?|upvotes?|points?|votes?|shares?|reposts?)(?![\\p{L}])",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 250)]
     private static partial Regex CountThenWord();
 
     [GeneratedRegex(@"\b(?<w>views?|comments?|replies|likes?|upvotes?|points?|votes?|shares?)\s*[:(]\s*(?<n>\d[\d,\.]*\s?[kKmM]?)",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 250)]
     private static partial Regex WordThenCount();
 
+    // Structured count on the post element itself (e.g. <shreddit-post comment-count="13">, data-comment-count="13").
+    [GeneratedRegex(@"\b(?:data-)?comments?-?count\s*=\s*[""']?(?<n>\d{1,9})",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 250)]
+    private static partial Regex CommentCountAttribute();
+
+    // Structured vote score on the post element (e.g. <shreddit-post score="42">, data-score="42").
+    [GeneratedRegex(@"\b(?:data-)?score\s*=\s*[""']?(?<n>\d{1,9})""",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 250)]
+    private static partial Regex ScoreAttribute();
+
+    // phpBB listing rows with unlabeled count cells: replies then views (postdetails spans).
+    [GeneratedRegex("class=\"topictitle\"[^<]*>[\\s\\S]{0,400}?class=\"name\"[\\s\\S]{0,300}?class=\"postdetails\">\\s*(?<r>\\d{1,9})\\s*</span>[\\s\\S]{0,200}?class=\"postdetails\">\\s*(?<v>\\d{1,9})\\s*</span>",
+        RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 250)]
+    private static partial Regex PhpBbListingRow();
+
     public static PageMetadata Enrich(PageMetadata? found, string html, string text)
     {
         long? views = found?.Views, likes = found?.Likes, comments = found?.Comments, shares = found?.Shares, score = found?.Score;
+
+        comments ??= StructuredMedian(html, CommentCountAttribute());
+        score ??= StructuredMedian(html, ScoreAttribute());
+        comments ??= StructuredMedian(html, PhpBbListingRow(), "r");
+        views ??= StructuredMedian(html, PhpBbListingRow(), "v");
 
         if (views is null || likes is null || comments is null || shares is null || score is null)
         {
@@ -51,7 +71,7 @@ public static partial class PopularityEstimator
         if (hasCounts)
         {
             engagement = found?.EngagementScore
-                ?? (likes ?? 0) * 3 + (comments ?? 0) * 4 + (shares ?? 0) * 2 + (views ?? 0) + (score ?? 0);
+                ?? PageMetadata.Engagement(views, likes, comments, shares, score);
             confidence = found is { Confidence: > 0.6 } ? found.Confidence : 0.6;
         }
         else
@@ -69,13 +89,35 @@ public static partial class PopularityEstimator
         var n = ParseCount(m.Groups["n"].Value);
         if (n is null or <= 0) return;
         var w = m.Groups["w"].Value.ToLowerInvariant();
-        var kind = w.StartsWith("view") ? "view"
-            : w.StartsWith("comment") || w.StartsWith("repl") ? "comment"
+        var kind = w.StartsWith("view") || w.StartsWith("visning") || w.StartsWith("aufruf") || w.StartsWith("visita") || w.StartsWith("vue") || w.StartsWith("pregled") ? "view"
+            : w.StartsWith("comment") || w.StartsWith("repl") || w == "svar" || w.StartsWith("kommentar") || w.StartsWith("comentario") || w.StartsWith("odgovor") || w.StartsWith("antwort") ? "comment"
             : w.StartsWith("like") || w.StartsWith("upvote") ? "like"
             : w.StartsWith("share") || w.StartsWith("repost") ? "share"
             : "score";   // points, votes
         if (!seen.TryGetValue(kind, out var list)) seen[kind] = list = new List<long>();
         if (list.Count < MaxMatchesPerKind) list.Add(n.Value);
+    }
+
+    /// Median of structured comment-count attributes (bounded scan). Zero is a real value and is kept.
+    private static long? StructuredMedian(string html, Regex attribute, string group = "n")
+    {
+        var sample = html.Length > ScanChars ? html[..ScanChars] : html;
+        var values = new List<long>();
+        try
+        {
+            foreach (Match m in attribute.Matches(sample))
+            {
+                if (values.Count >= MaxMatchesPerKind) break;
+                if (ParseCount(m.Groups[group].Value) is { } n) values.Add(n);
+            }
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            // Bounded scan: keep whatever matched before the timeout.
+        }
+        if (values.Count == 0) return null;
+        values.Sort();
+        return values[(values.Count - 1) / 2];
     }
 
     private static long? Median(Dictionary<string, List<long>> seen, string kind)

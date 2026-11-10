@@ -34,6 +34,10 @@ public static class PageParser
         string? source = null, author = null, tags = null;
         DateTimeOffset? publishedAt = null;
         var found = false;
+        var ld = JsonLdCounts.Read(html);
+        views = ld.Views; likes = ld.Likes; shares = ld.Shares; comments = ld.Comments; publishedAt = ld.Published;
+        var embedded = EmbeddedJsonCounts.Read(html);
+        views ??= embedded.Views; likes ??= embedded.Likes;
         var pos = 0;
         while (pos < limit)
         {
@@ -49,7 +53,7 @@ public static class PageParser
             if (key is null || value is null) continue;
 
             var normalized = new string(key.Where(char.IsLetterOrDigit).ToArray());
-            if (normalized.Contains("view", StringComparison.Ordinal) || normalized.Contains("impression", StringComparison.Ordinal))
+            if (normalized.Contains("view", StringComparison.Ordinal) || normalized.Contains("impression", StringComparison.Ordinal) || normalized.Contains("interactioncount", StringComparison.Ordinal))
                 views ??= ParseCount(value);
             else if (normalized.Contains("like", StringComparison.Ordinal) || normalized.Contains("favorite", StringComparison.Ordinal) || normalized.Contains("upvote", StringComparison.Ordinal))
                 likes ??= ParseCount(value);
@@ -61,7 +65,7 @@ public static class PageParser
                 score ??= ParseCount(value);
             else if (normalized is "author" or "articleauthor" or "dccreator") author ??= value;
             else if (normalized is "ogsitename" or "applicationname" or "sitename") source ??= value;
-            else if (normalized.Contains("published", StringComparison.Ordinal) || normalized.Contains("pubdate", StringComparison.Ordinal) || normalized is "datepublished" or "date")
+            else if (normalized.Contains("published", StringComparison.Ordinal) || normalized.Contains("pubdate", StringComparison.Ordinal) || normalized is "datepublished" or "date" or "uploaddate" or "datecreated")
             {
                 if (DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date))
                     publishedAt ??= date;
@@ -70,12 +74,40 @@ public static class PageParser
 
         }
 
+        publishedAt ??= FindPublishedAttribute(html);
         var hasCounts = views.HasValue || likes.HasValue || shares.HasValue || comments.HasValue || score.HasValue;
         found = hasCounts || source is not null || author is not null || publishedAt.HasValue || tags is not null;
         if (!found) return null;
         return new PageMetadata(views, likes, shares, comments, score,
-            hasCounts ? (likes ?? 0) * 3 + (comments ?? 0) * 4 + (shares ?? 0) * 2 + (views ?? 0) + (score ?? 0) : null,
+            hasCounts ? PageMetadata.Engagement(views, likes, comments, shares, score) : null,
             source, author, publishedAt, tags, hasCounts ? 0.6 : 0.35);
+    }
+
+    private static readonly string[] DateAttributeMarkers = { "created-timestamp=", "<time", "data-timestamp=", "data-datetime=" };
+
+    /// Generic fallback: first machine-readable date attribute (shreddit created-timestamp, <time datetime>), bounded scan.
+    private static DateTimeOffset? FindPublishedAttribute(string html)
+    {
+        var limit = Math.Min(html.Length, 400_000);
+        foreach (var marker in DateAttributeMarkers)
+        {
+            var pos = 0;
+            for (var n = 0; n < 3 && pos < limit; n++)
+            {
+                var start = html.IndexOf(marker, pos, limit - pos, StringComparison.OrdinalIgnoreCase);
+                if (start < 0) break;
+                var end = html.IndexOf('>', start, Math.Min(limit - start, 600));
+                if (end < 0) break;
+                pos = end + 1;
+                var tag = html.Substring(start, end - start + 1);
+                var value = Attr(tag, "created-timestamp") ?? Attr(tag, "datetime") ?? Attr(tag, "data-timestamp") ?? Attr(tag, "data-datetime");
+                if (value is null) continue;
+                if (DateTimeOffset.TryParse(value.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var date)
+                    && date.Year is >= 1995 and <= 2100)
+                    return date;
+            }
+        }
+        return null;
     }
 
     private static long? ParseCount(string value)

@@ -15,7 +15,7 @@ public class FilterIntegrationTests
         host.RouteSite("example.com/", caps);
         await host.Store!.SaveSearchAsync("example.com/", "html200", caps, DateTimeOffset.UtcNow);
         var pages = caps.Select((c, i) => new NewPage(c, HtmlCodec.Compress($"<html><body>zebra{i}</body></html>"),
-            new ParsedPage("p" + i, null, "zebra" + i, new PageMetadata(Likes: 10 * (i + 1))), DateTimeOffset.UtcNow)).ToList();
+            new ParsedPage("p" + i, null, "zebra" + i, new PageMetadata(Likes: 10 * (i + 1), Confidence: 0.6)), DateTimeOffset.UtcNow)).ToList();
         await host.Store.SavePagesAsync(pages);
         return host;
     }
