@@ -9,3 +9,6 @@ TestResults/
 # Local diagnostic logs (never commit)
 *.log
 logs/
+
+# Local browser memory diagnostics (large, machine-specific)
+assets/memory-report*.json
