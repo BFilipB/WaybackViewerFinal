@@ -52,7 +52,7 @@ public class OperationEventTests
         await using var host = await AppHost.StartAsync();
         var store = host.App.Services.GetRequiredService<IArchiveStore>();
         var bus = new OperationEventBus();
-        var publisher = new OperationEventPublisher(store, bus, NullLogger<OperationEventPublisher>.Instance);
+        var publisher = new OperationEventPublisher(store, bus, NullLogger<OperationEventPublisher>.Instance) { MinProgressInterval = TimeSpan.Zero };
         var op = await store.CreateOrGetOperationAsync("evt.com/", "", OperationKind.PagePreload, DateTimeOffset.UtcNow);
         await store.UpdateOperationAsync(op with { State = OperationState.Running, Total = 4, UpdatedAt = DateTimeOffset.UtcNow });
 
@@ -70,6 +70,38 @@ public class OperationEventTests
         var last = bus.Since(0).Last();
         Assert.True(last.Terminal);
         Assert.Equal("Completed", last.State);
+    }
+
+    [Fact]
+    public async Task Publisher_throttles_progress_but_sends_state_changes_at_once()
+    {
+        await using var host = await AppHost.StartAsync();
+        var store = host.App.Services.GetRequiredService<IArchiveStore>();
+        var bus = new OperationEventBus();
+        var now = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var publisher = new OperationEventPublisher(store, bus, NullLogger<OperationEventPublisher>.Instance)
+        { MinProgressInterval = TimeSpan.FromSeconds(1), Clock = () => now };
+        var op = await store.CreateOrGetOperationAsync("throttle.com/", "", OperationKind.PagePreload, DateTimeOffset.UtcNow);
+        await store.UpdateOperationAsync(op with { State = OperationState.Running, Total = 100, UpdatedAt = DateTimeOffset.UtcNow });
+        await publisher.TickAsync(CancellationToken.None);
+        var first = bus.LastId;
+
+        for (var i = 1; i <= 5; i++)   // five progress changes within the same second
+        {
+            await store.UpdateOperationAsync(op with { State = OperationState.Running, Total = 100, Completed = i, UpdatedAt = DateTimeOffset.UtcNow });
+            await publisher.TickAsync(CancellationToken.None);
+        }
+        Assert.Equal(first, bus.LastId);
+
+        now = now.AddSeconds(1);   // the latest progress goes out once the interval has passed
+        await publisher.TickAsync(CancellationToken.None);
+        Assert.Equal(first + 1, bus.LastId);
+        Assert.Equal(5, bus.Since(first).Single().Completed);
+
+        await store.UpdateOperationAsync(op with { State = OperationState.Paused, Total = 100, Completed = 6, UpdatedAt = DateTimeOffset.UtcNow });
+        await publisher.TickAsync(CancellationToken.None);   // state change: not throttled
+        Assert.Equal(first + 2, bus.LastId);
+        Assert.Equal("Paused", bus.Since(first + 1).Single().State);
     }
 
     [Fact]

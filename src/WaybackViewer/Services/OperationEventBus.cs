@@ -64,8 +64,15 @@ public sealed class OperationEventPublisher(IArchiveStore store, OperationEventB
     : BackgroundService
 {
     private readonly Dictionary<long, BackgroundOperation> tracked = new();
+    private readonly Dictionary<long, DateTime> lastSent = new();
 
     public TimeSpan Interval { get; init; } = TimeSpan.FromMilliseconds(750);
+
+    /// Progress-only changes of one operation are published at most this often (state changes go out at once),
+    /// so open browser tabs are not woken up several times a second while downloads run.
+    public TimeSpan MinProgressInterval { get; init; } = TimeSpan.FromSeconds(1);
+
+    public Func<DateTime> Clock { get; init; } = () => DateTime.UtcNow;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -86,13 +93,19 @@ public sealed class OperationEventPublisher(IArchiveStore store, OperationEventB
         foreach (var op in active)
         {
             seen.Add(op.Id);
-            if (!tracked.TryGetValue(op.Id, out var prev) || Changed(prev, op)) bus.Publish(op);
+            var now = Clock();
+            if (tracked.TryGetValue(op.Id, out var prev) && !Changed(prev, op)) continue;
+            if (prev is not null && prev.State == op.State && lastSent.TryGetValue(op.Id, out var at) && now - at < MinProgressInterval)
+                continue;   // progress only, too soon: keep the last published snapshot so the change is sent next time
+            bus.Publish(op);
             tracked[op.Id] = op;
+            lastSent[op.Id] = now;
         }
         foreach (var id in tracked.Keys.Where(k => !seen.Contains(k)).ToList())
         {
             var prev = tracked[id];
             tracked.Remove(id);
+            lastSent.Remove(id);
             var current = (await store.GetOperationsForSearchAsync(prev.Prefix, prev.Filter, ct).ConfigureAwait(false))
                 .FirstOrDefault(o => o.Id == id);
             if (current is not null) bus.Publish(current);   // finished (terminal) state

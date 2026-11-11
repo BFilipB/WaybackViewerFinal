@@ -373,7 +373,7 @@ td.cell-clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 			}
 
 			function t() { if (c) c.textContent = new Date().toLocaleTimeString(); }
-			t(); setInterval(t, 1000);
+			t(); setInterval(function () { if (!document.hidden) t(); }, 1000);
 
 			function cycle(select, step) {
 			if (!select || !select.options.length) return;
@@ -413,14 +413,14 @@ var now = Date.now(); if (now - lastBeep < 2000) return; lastBeep = now;
 beep(ev.state === 'Failed' ? 220 : ev.failed > 0 ? 440 : 880);
 }
 if (!window.EventSource) return;
-var es = new EventSource('/operations/events');
-es.onopen = function () { live.connected = true; };
-es.onerror = function () { live.connected = false; };
-es.addEventListener('operation', function (m) {
-var ev; try { ev = JSON.parse(m.data); } catch (e) { return; }
-window.dispatchEvent(new CustomEvent('wb-operation', { detail: ev }));
-sound(ev);
-});
+// The live stream is open only while the tab is visible; closing it releases the stream buffers in the browser.
+var es = null;
+function onEvent(m) { var ev; try { ev = JSON.parse(m.data); } catch (e) { return; } window.dispatchEvent(new CustomEvent('wb-operation', { detail: ev })); sound(ev); }
+function openLive() { if (es) return; es = new EventSource('/operations/events'); es.onopen = function () { live.connected = true; }; es.onerror = function () { live.connected = false; }; es.addEventListener('operation', onEvent); }
+function closeLive() { if (!es) return; es.close(); es = null; live.connected = false; }
+document.addEventListener('visibilitychange', function () { if (document.hidden) closeLive(); else openLive(); });
+window.addEventListener('pagehide', closeLive);
+if (!document.hidden) openLive();
 })();
 </script>	<script>(function(){var s=document.getElementById('motionSelect');if(!s)return;s.value=document.documentElement.getAttribute('data-motion')||'rich';s.addEventListener('change',function(){document.documentElement.setAttribute('data-motion',s.value);try{localStorage.setItem('wb-motion',s.value);}catch(e){}});})();</script>
 	</body>

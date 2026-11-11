@@ -416,7 +416,7 @@ else if (Model.CachedAt is not null)
   const ss = byId('ss'), ssMain = byId('ssMain'), ssLoading = byId('ssLoading');
   const ssLoadingText = byId('ssLoadingText'), ssError = byId('ssError'), ssReader = byId('ssReader');
   const ssModeBtn = byId('ssMode');
-  const AHEAD = 1, BEHIND = 0, SPINNER_DELAY_MS = 150, TIMEOUT_MS = 20000, TEXT_LOOKAHEAD = 8, TEXT_CACHE_MAX = 80;
+  const AHEAD = 1, BEHIND = 0, SPINNER_DELAY_MS = 150, TIMEOUT_MS = 20000, TEXT_LOOKAHEAD = 4, TEXT_CACHE_MAX = 24;
   const frames = new Map();                         // full view: slide index -> { el, loaded }
   const seen = new Set();                           // full view: keyOf(card) values that finished loading once
   const textPromises = new Map(), textValues = new Map();   // fast view: text cache
@@ -450,7 +450,9 @@ else if (Model.CachedAt is not null)
     updateModeButton();
     if (!ss.hidden) showSlide();
   }
-  function dropFrames() { frames.forEach(f => f.el.remove()); frames.clear(); }
+  // Blank a frame before removing it so the browser releases the archived page (scripts, images) right away.
+  function freeFrame(f) { f.el.src = 'about:blank'; f.el.remove(); }
+  function dropFrames() { frames.forEach(freeFrame); frames.clear(); }
 
   function textFor(card) {
     const key = keyOf(card);
@@ -537,7 +539,7 @@ else if (Model.CachedAt is not null)
   function showFull(card) {
     ssReader.hidden = true;
     for (const [i, f] of [...frames]) {
-      if (i < idx - BEHIND || i > idx + AHEAD) { f.el.remove(); frames.delete(i); }
+      if (i < idx - BEHIND || i > idx + AHEAD) { freeFrame(f); frames.delete(i); }
     }
     const current = frameFor(idx);
     frames.forEach((f, i) => { f.el.hidden = i !== idx; });
@@ -729,7 +731,7 @@ else if (Model.CachedAt is not null)
         preloadStatus.textContent = (p.running ? 'Downloading and saving: ' : 'Saved: ') +
           p.completed + ' / ' + p.total + (p.failed ? ' (' + p.failed + ' failed)' : '') + (p.skipped ? ' (' + p.skipped + ' skipped)' : '') + speed + left + detail;
       }
-      if (p.running) setTimeout(pollPreloadStatus, 1000);
+      if (p.running) setTimeout(pollPreloadStatus, document.hidden ? 10000 : 2000);
     } catch { setTimeout(pollPreloadStatus, 2000); }
   }
   pollPreloadStatus();
@@ -1247,6 +1249,7 @@ else if (Model.CachedAt is not null)
   const wfLater = ms => { clearTimeout(wfTimer); wfTimer = setTimeout(pollWorkflow, ms); };
   async function pollWorkflow() {
     clearTimeout(wfTimer);
+    if (document.hidden) { wfLater(10000); return; }   // hidden tab: check rarely
     try {
       const q = currentQuery();
       if (!q.url) return;

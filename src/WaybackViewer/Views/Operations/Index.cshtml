@@ -11,14 +11,14 @@
 		parts.Add("dir=" + (Model.Descending ? "desc" : "asc"));
 		return "/operations?" + string.Join("&", parts);
 	}
-	string Eta(double? seconds) => seconds is null ? "–" : TimeSpan.FromSeconds(seconds.Value).ToString(seconds.Value >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
+	string Eta(double? seconds) => seconds is null ? "ï¿½" : TimeSpan.FromSeconds(seconds.Value).ToString(seconds.Value >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
 	string Bar(BackgroundOperation? op) => op is null ? "" : op.State switch
 	{
 		OperationState.Failed => "wf-err",
 		OperationState.Completed or OperationState.CompletedWithFailures => "wf-done",
 		_ => "wf-on"
 	};
-	string Count(BackgroundOperation? op) => op is null ? "–" : $"{op.Completed}/{op.Total}";
+	string Count(BackgroundOperation? op) => op is null ? "ï¿½" : $"{op.Completed}/{op.Total}";
 	var states = new[] { (null as string, "All states"), ("active", "Active"), ("paused", "Paused"), ("completed", "Completed"), ("failures", "With failures") };
 	var types = new[] { (null as string, "All types"), ("captureload", "Capture list"), ("preload", "Page preload") };
 }
@@ -97,10 +97,10 @@
 			<td><div class="wf-track"><i class="@Bar(row.CaptureLoad)" data-f="captureBar" style="width:@(row.CapturePercent.ToString(System.Globalization.CultureInfo.InvariantCulture))%"></i></div><small data-f="captureText">@Count(row.CaptureLoad)</small></td>
 			<td><div class="wf-track"><i class="@Bar(row.Preload)" data-f="preloadBar" style="width:@(row.PreloadPercent.ToString(System.Globalization.CultureInfo.InvariantCulture))%"></i></div><small data-f="preloadText">@Count(row.Preload)</small></td>
 			<td class="hide-sm" data-f="saved">@row.Saved</td>
-			<td class="hide-lg" data-f="skipped">@(row.Skipped?.ToString() ?? "–")</td>
+			<td class="hide-lg" data-f="skipped">@(row.Skipped?.ToString() ?? "ï¿½")</td>
 			<td class="hide-sm" data-f="failed">@row.Failed</td>
 			<td class="hide-md" data-f="pending">@row.Pending</td>
-			<td class="hide-lg" data-f="speed">@(row.PerSecond > 0 ? row.PerSecond + "/s" : "–")</td>
+			<td class="hide-lg" data-f="speed">@(row.PerSecond > 0 ? row.PerSecond + "/s" : "ï¿½")</td>
 			<td class="hide-lg" data-f="eta">@Eta(row.EtaSeconds)</td>
 			<td class="operation-error cell-clip hide-md" data-f="error" title="@row.LastError">@row.LastError</td>
 			<td class="ops-actions">
@@ -117,9 +117,9 @@
   }
 
   <div class="pager">
-	@if (Model.Page > 1) { <a href="@Qs(Model.Page - 1, Model.StateFilter, Model.TypeFilter)">« Prev</a> }
-	<span>Page @Model.Page of @Model.PageCount · @Model.Total URLs</span>
-	@if (Model.Page < Model.PageCount) { <a href="@Qs(Model.Page + 1, Model.StateFilter, Model.TypeFilter)">Next »</a> }
+	@if (Model.Page > 1) { <a href="@Qs(Model.Page - 1, Model.StateFilter, Model.TypeFilter)">ï¿½ Prev</a> }
+	<span>Page @Model.Page of @Model.PageCount ï¿½ @Model.Total URLs</span>
+	@if (Model.Page < Model.PageCount) { <a href="@Qs(Model.Page + 1, Model.StateFilter, Model.TypeFilter)">Next ï¿½</a> }
   </div>
 </section>
 
@@ -133,6 +133,7 @@
   #opsTable th, #opsTable td { padding: 4px 5px; }
   #opsTable td { overflow: hidden; text-overflow: ellipsis; }
   #opsTable .wf-track { width: 100%; }
+  #opsTable .wf-track i { transition: none; }
   #opsTable td.ops-actions { white-space: nowrap; overflow: visible; }
   .ops-actions button { padding: 2px 5px; font-size: 11px; margin: 0 2px 0 0; white-space: nowrap; }
   .ops-badge { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); }
@@ -285,15 +286,16 @@
     if (btn) confirmDelete(btn.closest('tr'), btn.dataset.delete).catch(err => { message.textContent = 'Delete failed (' + err.message + ').'; });
   });
 
-  const set = (tr, f, v) => { const el = tr.querySelector('[data-f="' + f + '"]'); if (el) el.textContent = v; };
+  // Only touch the DOM when a value really changed (less layout, paint and garbage while the page is watched).
+  const set = (tr, f, v) => { const el = tr.querySelector('[data-f="' + f + '"]'); const s = String(v); if (el && el.textContent !== s) el.textContent = s; };
   const bar = (tr, f, op) => {
 	const el = tr.querySelector('[data-f="' + f + '"]'); if (!el) return;
 	const done = op && (op.state === 6 || op.state === 8);
 	const pct = !op ? 0 : op.total > 0 ? Math.min(100, op.completed * 100 / op.total) : (done || op.state === 7 ? 100 : 0);
-	el.style.width = pct + '%';
-	el.className = !op ? '' : op.state === 7 ? 'wf-err' : done ? 'wf-done' : 'wf-on';
+	const w = pct + '%'; if (el.style.width !== w) el.style.width = w;
+	const cls = !op ? '' : op.state === 7 ? 'wf-err' : done ? 'wf-done' : 'wf-on'; if (el.className !== cls) el.className = cls;
   };
-  const eta = s => s == null ? '–' : (s >= 3600 ? Math.floor(s / 3600) + ':' : '') + String(Math.floor(s % 3600 / 60)).padStart(s >= 3600 ? 2 : 1, '0') + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+  const eta = s => s == null ? 'ï¿½' : (s >= 3600 ? Math.floor(s / 3600) + ':' : '') + String(Math.floor(s % 3600 / 60)).padStart(s >= 3600 ? 2 : 1, '0') + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 
   // Polls the status of the visible rows only.
   async function refresh() {
@@ -304,12 +306,12 @@
 	status.forEach((r, i) => {
 	  const tr = visible[i]; if (!tr) return;
 	  const badge = tr.querySelector('[data-f="state"]');
-	  badge.textContent = r.state; badge.className = 'ops-badge ops-' + r.state.toLowerCase();
+	  if (badge.textContent !== r.state) { badge.textContent = r.state; badge.className = 'ops-badge ops-' + r.state.toLowerCase(); }
 	  bar(tr, 'captureBar', r.captureLoad); bar(tr, 'preloadBar', r.preload);
-	  set(tr, 'captureText', r.captureLoad ? r.captureLoad.completed + '/' + r.captureLoad.total : '–');
-	  set(tr, 'preloadText', r.preload ? r.preload.completed + '/' + r.preload.total : '–');
-	  set(tr, 'saved', r.saved); set(tr, 'skipped', r.skipped ?? '–'); set(tr, 'failed', r.failed);
-	  set(tr, 'pending', r.pending); set(tr, 'speed', r.perSecond > 0 ? r.perSecond + '/s' : '–');
+	  set(tr, 'captureText', r.captureLoad ? r.captureLoad.completed + '/' + r.captureLoad.total : 'ï¿½');
+	  set(tr, 'preloadText', r.preload ? r.preload.completed + '/' + r.preload.total : 'ï¿½');
+	  set(tr, 'saved', r.saved); set(tr, 'skipped', r.skipped ?? 'ï¿½'); set(tr, 'failed', r.failed);
+	  set(tr, 'pending', r.pending); set(tr, 'speed', r.perSecond > 0 ? r.perSecond + '/s' : 'ï¿½');
 	  set(tr, 'eta', eta(r.etaSeconds)); set(tr, 'error', r.lastError || '');
 	  const toggle = tr.querySelector('[data-row="pause"],[data-row="resume"]');
 	  toggle.dataset.row = r.paused ? 'resume' : 'pause'; toggle.textContent = r.paused ? 'Resume' : 'Pause';
@@ -322,11 +324,15 @@
   async function poll() {
 	let active = true;
 	let failed = false;
+	if (document.hidden) { setTimeout(poll, 5000); return; }   // hidden tab: no requests; refreshed when shown again
 	try { active = await refresh(); setLive(true); } catch (err) { failed = true; setLive(false); console.warn('operations status poll failed', err); }
 	setTimeout(poll, failed ? 10000 : window.wbLive && window.wbLive.connected ? 15000 : active ? 1500 : 5000);   // SSE connected: polling is only a safety net
   }
+  // Live events: only for URLs shown on this page, at most one refresh per 2 s, none while the tab is hidden.
+  const shown = ev => rows().some(tr => tr.dataset.prefix === ev.prefix && tr.dataset.filter === ev.filter);
   let pending = false;
-  window.addEventListener('wb-operation', () => { if (pending) return; pending = true; setTimeout(() => { pending = false; refresh().then(() => setLive(true), err => { setLive(false); console.warn('operations status refresh failed', err); }); }, 250); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh().catch(err => console.warn('operations status refresh failed', err)); });
+  window.addEventListener('wb-operation', e => { if (pending || document.hidden || (e.detail && !shown(e.detail))) return; pending = true; setTimeout(() => { pending = false; refresh().then(() => setLive(true), err => { setLive(false); console.warn('operations status refresh failed', err); }); }, 2000); });
   poll();
 })();
 </script>
