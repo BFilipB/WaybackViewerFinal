@@ -22,6 +22,22 @@ public class SchedulerTests
             .ToList();
 
     [Fact]
+    public async Task A_job_added_while_the_only_job_is_downloading_gets_the_next_turn()
+    {
+        var (coordinator, loader) = Create(workers: 1);
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        loader.Hook = _ => gate.Task;
+        await coordinator.EnqueueAsync(Job("a.com", 3), "a.com/", "html200");
+        await SampleData.Eventually(() => Task.FromResult(loader.Started.Count == 1));   // a.com #1 is in flight, cursor has wrapped
+        await coordinator.EnqueueAsync(Job("b.com", 3), "b.com/", "html200");
+        gate.SetResult();
+        await coordinator.WhenIdleAsync().WaitAsync(TimeSpan.FromSeconds(10));
+
+        var order = loader.Started.Select(u => u.Contains("a.com") ? 'a' : 'b').ToArray();
+        Assert.Equal("ababab", new string(order));
+    }
+
+    [Fact]
     public async Task Two_jobs_are_served_alternately()
     {
         var (coordinator, loader) = Create(workers: 1);

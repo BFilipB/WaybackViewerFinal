@@ -24,6 +24,7 @@ public class ScaleBenchmarkTests(ITestOutputHelper output)
     }
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task Page_and_autocomplete_stay_fast_at_100k_captures()
     {
         var dir = Path.Combine(Path.GetTempPath(), "wbv-scale-" + Guid.NewGuid().ToString("N"));
@@ -59,6 +60,7 @@ public class ScaleBenchmarkTests(ITestOutputHelper output)
     }
 
     [Fact]
+    [Trait("Category", "Performance")]
     public async Task Filtered_page_with_facets_stays_fast_at_100k_captures()
     {
         var dir = Path.Combine(Path.GetTempPath(), "wbv-scale-" + Guid.NewGuid().ToString("N"));

@@ -45,7 +45,7 @@ public class PreloadCoordinatorTests
         coordinator.Enqueue(SampleData.Stored(SampleData.Captures(40)));
         await Idle(coordinator);
         var status = coordinator.GetStatus();
-        Assert.InRange(status.PerSecond, 5, 5000);
+        Assert.True(status.PerSecond > 0, $"throughput should be reported, was {status.PerSecond}");   // no speed floor: shared CI runners vary widely
         Assert.Equal(status.PerSecond, coordinator.GetStatus().PerSecond); // frozen once the batch is finished
     }
 

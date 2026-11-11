@@ -998,8 +998,7 @@ job.Operation = job.Operation with
             var node = queues[key].First!;
             var item = node.Value;
             ringCursor = pos + 1;
-            RemovePendingLocked(node);
-            if (ring.Count == 0 || ringCursor >= ring.Count) ringCursor = 0;
+            RemovePendingLocked(node);   // the cursor may now equal ring.Count; the modulo above wraps it lazily, so a job added meanwhile gets the next turn
             return item;
         }
         return null;
