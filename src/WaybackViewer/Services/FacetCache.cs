@@ -16,6 +16,7 @@ public sealed class FacetCache(Microsoft.Extensions.Logging.ILogger<FacetCache>?
     // "One per thread" over 100,000 captures costs about 100 ms. Paging through the result, opening the export or
     // the slideshow all ask for the same view, so the last few views are kept (per loaded list, per filter).
     private const int MaxViews = 8;
+    internal const int MaxViewItems = 300_000;
     private readonly object viewLock = new();
     private readonly List<(SearchSnapshot Snapshot, CaptureFilter Filter, FilteredView View)> views = new();
 
@@ -41,7 +42,8 @@ public sealed class FacetCache(Microsoft.Extensions.Logging.ILogger<FacetCache>?
         lock (viewLock)
         {
             views.Add((snapshot, filter, view));
-            while (views.Count > MaxViews) views.RemoveAt(0);
+            // Bounded by views AND total items; the newest view is always kept.
+            while (views.Count > MaxViews || (views.Count > 1 && views.Sum(v => (long)v.View.Items.Count) > MaxViewItems)) views.RemoveAt(0);
         }
         return view;
     }

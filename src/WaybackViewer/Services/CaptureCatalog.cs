@@ -64,8 +64,8 @@ public sealed class CaptureCatalog(IArchiveStore store, IArchiveClient archive, 
 
     public async Task<bool> HasFreshSnapshotAsync(string prefix, string filter, CancellationToken ct = default)
     {
-        var saved = await store.GetSearchAsync(prefix, filter, ct).ConfigureAwait(false);
-        return saved is not null && !IsExpired(saved.CachedAt);
+        var head = await store.GetSearchPageAsync(prefix, filter, 0, 0, ct).ConfigureAwait(false);   // metadata only, no capture rows
+        return head is not null && !IsExpired(head.CachedAt);
     }
 
     private async Task<CatalogResult> RunAsync(string key, string prefix, string filter, bool refresh)

@@ -589,7 +589,29 @@ internal static class FilteredQueries
 		return rows;
 	}
 
-	/// Unsaved HTML captures of the filtered view, oldest first, after the cursor; one bounded batch per call.
+	/// Preload counters of a whole search in one aggregate pass (nothing materialized in memory).
+public static PreloadCounts? ReadPreloadCounts(DbConnection conn, string prefix, string filter, CancellationToken ct = default)
+{
+if (FindSearch(conn, prefix, filter, out _) is not { } id) return null;
+using var cmd = Cmd(conn, null, """
+SELECT COUNT(*),
+       COALESCE(SUM(CASE WHEN p.CaptureId IS NULL THEN 1 ELSE 0 END), 0),
+       COALESCE(SUM(CASE WHEN p.CaptureId IS NULL AND o.Outcome = 1 THEN 1 ELSE 0 END), 0),
+       COALESCE(SUM(CASE WHEN p.CaptureId IS NULL AND o.Outcome = 2 THEN 1 ELSE 0 END), 0)
+FROM SearchCaptures sc
+JOIN Captures c ON c.Id = sc.CaptureId
+LEFT JOIN Pages p ON p.CaptureId = c.Id
+LEFT JOIN CaptureOutcomes o ON o.CaptureId = c.Id
+WHERE sc.SearchId = @sid AND lower(c.MimeType) LIKE '%html%'
+""");
+Param(cmd, "@sid", id);
+using var reader = cmd.ExecuteReader();
+if (!reader.Read()) return null;
+return new PreloadCounts(Convert.ToInt32(reader.GetValue(0)), Convert.ToInt32(reader.GetValue(1)),
+Convert.ToInt32(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3)));
+}
+
+/// Unsaved HTML captures of the filtered view, oldest first, after the cursor; one bounded batch per call.
     public static IReadOnlyList<StoredCapture> ReadUnsavedBatch(DbConnection conn, string prefix, string filter, CaptureFilter f,
         StoredCapture? after, int limit)
     {
@@ -598,7 +620,7 @@ internal static class FilteredQueries
         var cursor = after is null ? "" : " AND (CaptureTs > @ats OR (CaptureTs = @ats AND Id > @aid))";
         using var cmd = Cmd(conn, null, ViewCte(f, where) + $"""
              SELECT Id, CaptureTs, Original, MimeType, StatusCode FROM v
-             WHERE Html = 1 AND Rd = 0{cursor} ORDER BY CaptureTs ASC, Id ASC LIMIT @limit
+             WHERE Html = 1 AND Rd = 0 AND NOT EXISTS (SELECT 1 FROM CaptureOutcomes o WHERE o.CaptureId = v.Id){cursor} ORDER BY CaptureTs ASC, Id ASC LIMIT @limit
              """);
         Bind(cmd, args);
         Param(cmd, "@limit", Math.Max(1, limit));

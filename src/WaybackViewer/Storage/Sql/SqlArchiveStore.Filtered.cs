@@ -70,6 +70,13 @@ public sealed partial class SqlArchiveStore
 			return FilteredQueries.ReadHistory(conn, prefix, filter, original, limit);
 		}, ct);
 
+	public Task<PreloadCounts?> GetPreloadCountsAsync(string prefix, string filter, CancellationToken ct = default) =>
+		Task.Run(() =>
+		{
+			using var conn = Open();
+			return FilteredQueries.ReadPreloadCounts(conn, prefix, filter, ct);
+		}, ct);
+
 	public async Task<IReadOnlyList<StoredCapture>> GetUnsavedHtmlBatchAsync(string prefix, string filter, CaptureFilter captureFilter,
         StoredCapture? after, int limit, CancellationToken ct = default)
     {

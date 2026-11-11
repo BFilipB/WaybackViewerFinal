@@ -152,13 +152,17 @@ public sealed partial class SqlArchiveStore : IArchiveStore
                 }
 
                 var loaded = LoadCachedSearch(conn, id, DateTimeOffset.FromUnixTimeMilliseconds(cachedAtMs));
-                UrlClassifier.Warm(loaded.Captures.Select(c => c.Original).ToArray());
+                if (loaded.Captures.Length <= SearchCacheBudget.MaxWarmUrls)
+                    UrlClassifier.Warm(loaded.Captures.Select(c => c.Original).ToArray());
                 lock (cacheLock)   // read under the lock so a concurrent MarkSaved cannot be missed
                 {
                     LoadSaved(conn, loaded);
                     loaded.LastUsed = ++useTick;
                     searchCache[key] = loaded;
-                    while (searchCache.Count > MaxCachedSearches)
+                    // Bounded by lists AND by total captures, so a few multi-million-capture lists cannot fill RAM.
+                    // The list just loaded is always kept (the caller needs it).
+                    while (searchCache.Count > MaxCachedSearches ||
+                           (searchCache.Count > 1 && searchCache.Values.Sum(c => (long)c.Captures.Length) > SearchCacheBudget.MaxCachedCaptures))
                     {
                         var oldest = searchCache.MinBy(p => p.Value.LastUsed).Key;
                         searchCache.Remove(oldest);

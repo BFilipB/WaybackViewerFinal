@@ -260,6 +260,13 @@ public sealed partial class SqliteArchiveStore
         return facets;
     }
 
+    public Task<PreloadCounts?> GetPreloadCountsAsync(string prefix, string filter, CancellationToken ct = default) =>
+        Task.Run(() =>
+        {
+            using var conn = Open();
+            return FilteredQueries.ReadPreloadCounts(conn, prefix, filter, ct);
+        }, ct);
+
     /// Unsaved HTML captures of the filtered view, oldest first, after the cursor; one bounded batch per call.
     public async Task<IReadOnlyList<StoredCapture>> GetUnsavedHtmlBatchAsync(string prefix, string filter, CaptureFilter f,
         StoredCapture? after, int limit, CancellationToken ct = default)
@@ -280,7 +287,7 @@ public sealed partial class SqliteArchiveStore
             var cursor = after is null ? "" : " AND (CaptureTs > $ats OR (CaptureTs = $ats AND Id > $aid))";
             using var cmd = Cmd(conn, null, ViewCte(f, where) + $"""
                  SELECT Id, CaptureTs, Original, MimeType, StatusCode FROM v
-                 WHERE Html = 1 AND Rd = 0{cursor} ORDER BY CaptureTs ASC, Id ASC LIMIT $limit
+                 WHERE Html = 1 AND Rd = 0 AND NOT EXISTS (SELECT 1 FROM CaptureOutcomes o WHERE o.CaptureId = v.Id){cursor} ORDER BY CaptureTs ASC, Id ASC LIMIT $limit
                  """);
             Bind(cmd, args);
             cmd.Parameters.AddWithValue("$limit", Math.Max(1, limit));

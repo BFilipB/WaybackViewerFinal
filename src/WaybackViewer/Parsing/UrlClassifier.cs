@@ -39,13 +39,15 @@ public static class UrlClassifier
     private static readonly ConcurrentDictionary<string, UrlInfo> Cache = new(StringComparer.Ordinal);
 
     private static int cacheSize;
+    /// Upper bound of cached classifications; the cache is cleared when it is reached.
+    internal const int MaxCacheEntries = 200_000;
 
     public static UrlInfo Classify(string original)
     {
         original ??= "";
         if (Cache.TryGetValue(original, out var hit)) return hit;
         var info = Compute(original);
-        if (Interlocked.Increment(ref cacheSize) > 600_000)
+        if (Interlocked.Increment(ref cacheSize) > MaxCacheEntries)
         {
             Cache.Clear();
             Interlocked.Exchange(ref cacheSize, 0);

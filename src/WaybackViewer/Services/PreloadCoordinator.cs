@@ -31,6 +31,13 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
         /// Speed window: when the job (re)started and how many were saved at that point.
         public long StartTicks = Stopwatch.GetTimestamp();
         public int SavedAtStart;
+        /// Database-backed window: the list being drained, the keyset cursor of the last capture read, and whether
+        /// the database has more. Exhausted = nothing left beyond what is in memory.
+        public CaptureFilter? Source;
+        public StoredCapture? Cursor;
+        public bool Exhausted = true;
+        public bool Refilling;
+        public bool ReadFailed;
     }
 
     private enum FailureKind { Skip, Transient, Permanent }
@@ -160,10 +167,18 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
                 job.Failed = Math.Max(0, job.Failed - reset);
             }
         }
-        var snapshot = await store.GetSearchAsync(prefix, filter, ct).ConfigureAwait(false);
-        if (snapshot is not null) await EnqueueAsync(snapshot.Captures, prefix, filter, ct).ConfigureAwait(false);
+        await EnqueueSearchAsync(prefix, filter, ct).ConfigureAwait(false);
         log.LogInformation("Retrying {Count} failed captures for {Prefix} ({Filter})", reset, prefix, filter);
         return reset;
+    }
+
+    /// Queues a whole saved search: as a bounded database window when the store can page pending captures,
+    /// else (stores without SQL paging, e.g. tests) from the saved list.
+    private async Task EnqueueSearchAsync(string prefix, string filter, CancellationToken ct)
+    {
+        if (await StartWindowAsync(prefix, filter, new CaptureFilter(), null, boost: false, ct).ConfigureAwait(false) >= 0) return;
+        var snapshot = await store.GetSearchAsync(prefix, filter, ct).ConfigureAwait(false);
+        if (snapshot is not null) await EnqueueAsync(snapshot.Captures, prefix, filter, ct).ConfigureAwait(false);
     }
 
     private int EnqueueCore(IEnumerable<StoredCapture> captures, BackgroundOperation? requestedOperation,
@@ -316,6 +331,7 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
                 RestartSpeedLocked(job);
                 SyncOperationLocked(job, OperationState.Running);
                 CheckJobLocked(job);
+                MaybeRefillLocked(job.Operation.Key);
             }
             resumeSignal.TrySetResult();
             resumeSignal = NewSignal(false);
@@ -330,14 +346,46 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
     public async Task<IReadOnlyList<BackgroundOperation>> GetOperationsAsync(CancellationToken ct = default) =>
         await store.GetOperationsAsync(activeOnly: true, ct).ConfigureAwait(false);
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    /// Resumes saved preloads in the background so the web server can start listening immediately.
+    public Task StartAsync(CancellationToken cancellationToken)
     {
-        var operations = await store.GetOperationsAsync(activeOnly: true, cancellationToken).ConfigureAwait(false);
-        foreach (var saved in operations.Where(o => o.Kind == OperationKind.PagePreload && o.IsActive))
+        lock (gate)
         {
-            var snapshot = await store.GetSearchAsync(saved.Prefix, saved.Filter, cancellationToken).ConfigureAwait(false);
-            if (snapshot is not null)
-                await EnqueueAsync(snapshot.Captures, saved.Prefix, saved.Filter, cancellationToken).ConfigureAwait(false);
+            resuming = true;   // busy until saved jobs are queued, so WhenIdleAsync does not complete too early
+            idle = NewIdle(false);
+        }
+        resumeTask = Task.Run(() => ResumeSavedAsync(cts.Token), CancellationToken.None);
+        return Task.CompletedTask;
+    }
+
+    private Task? resumeTask;
+    private bool resuming;
+
+    private async Task ResumeSavedAsync(CancellationToken ct)
+    {
+        try
+        {
+            var operations = await store.GetOperationsAsync(activeOnly: true, ct).ConfigureAwait(false);
+            foreach (var saved in operations.Where(o => o.Kind == OperationKind.PagePreload && o.IsActive))
+            {
+                await EnqueueSearchAsync(saved.Prefix, saved.Filter, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            log.LogInformation("Preload resume cancelled by shutdown");
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "Failed to resume saved preload operations");
+        }
+        finally
+        {
+            lock (gate)
+            {
+                resuming = false;
+                CheckIdleLocked();
+            }
         }
     }
 
@@ -348,7 +396,7 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
         lock (gate)
         {
             disposed = true;
-            foreach (var job in jobs.Values.Where(job => job.Outstanding > 0 && !job.Paused))
+            foreach (var job in jobs.Values.Where(job => (job.Outstanding > 0 || !job.Exhausted) && !job.Paused))
                 SyncOperationLocked(job, OperationState.Interrupted);
             resumeSignal.TrySetResult();
             workers = workerTasks.Where(t => !t.IsCompleted).ToArray();
@@ -366,6 +414,8 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
         // 3) abort what is still downloading or waiting for a retry: it has no outcome yet, so it stays pending in
         //    the database and is queued again on the next start.
         cts.Cancel();
+        if (resumeTask is not null)
+            await WaitWithTimeoutAsync(resumeTask, TimeSpan.FromSeconds(3), cancellationToken).ConfigureAwait(false);
 
         // 4) flush operation-state writes in order
         opQueue.Writer.TryComplete();
@@ -428,6 +478,7 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
             removedJobs.Add(jobKey);
             if (jobs.TryGetValue(jobKey, out var job))
             {
+                job.Exhausted = true;
                 var cleared = ClearJobQueueLocked(jobKey);
                 job.Outstanding -= cleared;
                 foreach (var (key, waiting) in retryWaiting.Where(p => p.Value.JobKey == jobKey).ToList())
@@ -446,7 +497,7 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
             ct.ThrowIfCancellationRequested();
             lock (gate)
             {
-                if (!jobs.TryGetValue(jobKey, out var job) || job.Outstanding <= 0)
+                if (!jobs.TryGetValue(jobKey, out var job) || (job.Outstanding <= 0 && !job.Refilling))
                 {
                     jobs.Remove(jobKey);
                     return;
@@ -551,6 +602,7 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
                 }
                 item = next;
                 inFlight[item.Capture.Key] = item.JobKey;
+                MaybeRefillLocked(item.JobKey);
             }
 
             if (LowOnDisk())
@@ -862,14 +914,16 @@ public sealed partial class PreloadCoordinator : IHostedService, IDisposable
         }
     }
 
-    private bool IsBusyLocked() => pendingIndex.Count > 0 || inFlight.Count > 0 || retryWaiting.Count > 0 || Volatile.Read(ref unsaved) > 0;
+    private bool IsBusyLocked() => resuming || pendingIndex.Count > 0 || inFlight.Count > 0 || retryWaiting.Count > 0 || Volatile.Read(ref unsaved) > 0 ||
+        jobs.Values.Any(j => j.Refilling || (!j.Exhausted && !j.Paused));
 
     /// A job is finished once every one of its captures has a persisted terminal state.
     private void CheckJobLocked(JobState job)
     {
         if (disposed || job.Outstanding > 0 || job.Paused) return;   // after shutdown the job stays Interrupted
+        if (!job.Exhausted || job.Refilling) return;                 // more pending captures are still in the database
         if (job.Operation.State is not (OperationState.Running or OperationState.Queued)) return;
-        SyncOperationLocked(job, job.SaveFailed ? OperationState.Failed : job.Failed > 0 ? OperationState.CompletedWithFailures : OperationState.Completed);
+        SyncOperationLocked(job, job.SaveFailed || job.ReadFailed ? OperationState.Failed : job.Failed > 0 ? OperationState.CompletedWithFailures : OperationState.Completed);
     }
 
     private void CheckIdleLocked()
@@ -923,6 +977,7 @@ job.Operation = job.Operation with
             Completed = Math.Min(preloadable, job.Saved),
             Failed = job.Failed,
             Error = state == OperationState.Failed && job.SaveFailed ? "Saving downloaded pages to the database kept failing."
+                : state == OperationState.Failed && job.ReadFailed ? "Reading the pending captures from the database failed."
                 : state == OperationState.CompletedWithFailures ? $"{job.Failed} captures could not be downloaded." : null
         };
         PersistOperation(job.Operation);
@@ -943,6 +998,7 @@ job.Operation = job.Operation with
             if (state == OperationState.Running)
             {
                 CheckJobLocked(job);
+                MaybeRefillLocked(job.Operation.Key);
                 resumeSignal.TrySetResult();
                 resumeSignal = NewSignal(false);
                 EnsureWorkersLocked();

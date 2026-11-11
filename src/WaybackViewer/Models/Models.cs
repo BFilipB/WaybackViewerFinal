@@ -81,6 +81,10 @@ public enum PreloadOutcome
 /// Why a capture is not (or could not be) preloaded. Reason: non-html, not-found, redirect, http-NNN, network, timeout, error.
 public sealed record CaptureOutcome(Capture Capture, PreloadOutcome Outcome, string Reason, DateTimeOffset At);
 
+/// Preload counters of a whole search, aggregated in SQL: HTML captures, unsaved ones, and the unsaved ones that
+/// already have a Skipped / Failed outcome.
+public sealed record PreloadCounts(int Html, int Unsaved, int Skipped, int Failed);
+
 public enum OperationKind
 {
     CaptureLoad,

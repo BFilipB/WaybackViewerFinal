@@ -145,6 +145,10 @@ public interface IArchiveStore
     /// Unsaved HTML captures of the filtered list, oldest first, after the cursor (one bounded batch per call).
     Task<IReadOnlyList<StoredCapture>> GetUnsavedHtmlBatchAsync(string prefix, string filter, CaptureFilter captureFilter,
         StoredCapture? after, int limit, CancellationToken ct = default) => Task.FromResult<IReadOnlyList<StoredCapture>>([]);
+
+    /// Preload counters of the whole search in one aggregate query (no rows materialized). Null = not supported / not saved.
+    Task<PreloadCounts?> GetPreloadCountsAsync(string prefix, string filter, CancellationToken ct = default) =>
+        Task.FromResult<PreloadCounts?>(null);
     // ---- delete (default implementations so test fakes need not implement them) --------------------------------
 
     /// Counts and size of what a delete of this searched URL would remove.

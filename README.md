@@ -604,6 +604,17 @@ UI interaction details:
 - Pause/Resume and Retry failed controls use busy states to prevent duplicate clicks. The UI no longer offers Stop; manage refresh and deletion on the Operations page.
 - Background operation commands are grouped and refreshed coherently to reduce flicker.
 
+How preloading works (in plain words):
+
+1. When a preload starts, the app counts the list's HTML captures in the database (saved, still to download, skipped, failed). Nothing else is loaded yet.
+2. It then reads only the first `Preload:MaxQueuedPerJob` (default 1,000) captures that still need downloading, oldest first.
+3. Workers download those pages. When fewer than half a window is left, the next window is read from the database.
+4. Pausing stops downloads and stops reading new windows; Resume continues from where it stopped.
+5. If the app is closed or crashes, nothing is lost: on the next start the job reads its first window again, and pages already saved, skipped or failed are left out automatically.
+6. A job is marked finished only when the database has no more captures for it and nothing is still downloading.
+
+Archived pages that declare an unknown character set (common on old sites) are decoded as UTF-8 instead of failing.
+
 ---
 
 ## 8) Configuration reference
@@ -624,6 +635,7 @@ UI interaction details:
 
 - `Scope` (`view` by default; `all` downloads all HTML captures for the search)
 - `Workers`
+- `MaxQueuedPerJob` (default 1,000): how many pending captures of one preload job are held in memory at a time. The rest stay in the database and are read in small batches as downloads finish, so a list with millions of captures uses the same RAM as a small one. Lower it if memory is tight; raising it does not make downloads faster.
 - `WriteBatchSize`
 - `WriteMaxDelayMs`
 - `MaxHtmlChars`
@@ -717,6 +729,23 @@ Use environment variables with `__` separators for deployment overrides, or loca
 - **Bounded server work where supported:** history is limited, unsaved-page downloads are read in batches, capture-set responses stream in pages, and several caches have explicit limits. Browser exports still assemble the final file in memory.
 - Performance tests exercise large lists, including 100,000-capture fixtures. Timings depend on hardware, warm caches, database size and concurrent work; they are not an end-user latency guarantee.
 - SQLite runs in WAL mode with tuned pragmas; responses are compressed and support ETag/304.
+
+### Memory use (keeping the app under about 1 GB)
+
+The database file lives on disk, but the app still uses RAM for whatever it keeps in memory. These limits keep that bounded:
+
+| What | Limit | What happens with more |
+|---|---|---|
+| Pending downloads per preload job | `Preload:MaxQueuedPerJob` (1,000) | Read from the database in batches as workers finish; progress and resume are unchanged. |
+| SQLite page cache per connection | 8 MB, no memory-mapping, temporary sort files on disk (`Storage:TempDirectory`) | SQLite reads from disk instead of RAM. |
+| Full capture lists kept in memory | 4 lists and 500,000 captures in total | The least recently used list is dropped and re-read from SQL when needed. |
+| Filtered views kept in memory | 8 views and 300,000 captures in total | The oldest view is rebuilt on next use. |
+| URL classification cache | 200,000 URLs | Cleared and rebuilt on demand. |
+| Startup warmup | Skips lists over 250,000 captures | Those lists are served by SQL paging. |
+
+These limits apply to the SQL paths used by SQLite and PostgreSQL. A store that cannot page captures in SQL falls back to loading the whole list in memory, so the limits above do not hold for it.
+
+Every `Logging:RuntimeMetricsSeconds` the log shows `runtime.metrics` (working set, GC heap) and `preload.metrics` (including `queuedInMemory`). If private memory goes over `Performance:MemoryWarnMb` (default 1024; 0 disables it), a `runtime.memory-high` warning is logged.
 
 ---
 ## 10) Reliability and pitfalls (known + handled)

@@ -31,6 +31,10 @@ public sealed class RuntimeMetricsLogger(ILogger<RuntimeMetricsLogger> log, ICon
                     proc.WorkingSet64 / 1048576.0, GC.GetTotalMemory(false) / 1048576.0, GC.CollectionCount(0), GC.CollectionCount(1), GC.CollectionCount(2),
                     proc.Threads.Count, ThreadPool.PendingWorkItemCount, ThreadPool.ThreadCount, cpuPct, FreeGb(),
                     (DateTimeOffset.UtcNow - RunInfo.StartedAt).TotalSeconds);
+                var warnMb = config.GetValue("Performance:MemoryWarnMb", 1024);
+                if (warnMb > 0 && proc.PrivateMemorySize64 / 1048576.0 > warnMb)
+                    log.LogWarning("runtime.memory-high privateMb={Private:F0} gcHeapMb={Heap:F0} limitMb={Limit}",
+                        proc.PrivateMemorySize64 / 1048576.0, GC.GetTotalMemory(false) / 1048576.0, warnMb);
                 LogPreload();
                 log.LogInformation("htmlstore.metrics saves={Saves} saveMb={Mb:F1} retries={Retries} loads={Loads} loadMisses={Misses}",
                     Interlocked.Read(ref WaybackViewer.Storage.HtmlFileStore.Saves), Interlocked.Read(ref WaybackViewer.Storage.HtmlFileStore.SaveBytes) / 1048576.0,
@@ -51,9 +55,9 @@ public sealed class RuntimeMetricsLogger(ILogger<RuntimeMetricsLogger> log, ICon
         var archive = (services.GetService(typeof(IOptions<ArchiveOptions>)) as IOptions<ArchiveOptions>)?.Value;
         var preload = (services.GetService(typeof(IOptions<PreloadOptions>)) as IOptions<PreloadOptions>)?.Value;
         var storage = (services.GetService(typeof(IOptions<StorageOptions>)) as IOptions<StorageOptions>)?.Value;
-        log.LogInformation("startup.config archiveConcurrency={Conc} minIntervalMs={MinI} maxIntervalMs={MaxI} archiveAttempts={AA} timeoutSec={To} preloadScope={Scope} workers={Workers} writeBatch={WB} writeDelayMs={WD} maxHtmlChars={MaxHtml} preloadAttempts={PA} storage={Provider} searchMaxAgeDays={Age} slowRequestMs={Slow} metricsSec={Metrics}",
+        log.LogInformation("startup.config archiveConcurrency={Conc} minIntervalMs={MinI} maxIntervalMs={MaxI} archiveAttempts={AA} timeoutSec={To} preloadScope={Scope} workers={Workers} maxQueuedPerJob={MaxQueued} writeBatch={WB} writeDelayMs={WD} maxHtmlChars={MaxHtml} preloadAttempts={PA} storage={Provider} searchMaxAgeDays={Age} slowRequestMs={Slow} metricsSec={Metrics}",
             archive?.MaxConcurrency, archive?.MinIntervalMs, archive?.MaxIntervalMs, archive?.MaxAttempts, archive?.RequestTimeoutSeconds,
-            preload?.Scope, preload?.Workers, preload?.WriteBatchSize, preload?.WriteMaxDelayMs, preload?.MaxHtmlChars, preload?.MaxAttempts,
+            preload?.Scope, preload?.Workers, preload?.MaxQueuedPerJob, preload?.WriteBatchSize, preload?.WriteMaxDelayMs, preload?.MaxHtmlChars, preload?.MaxAttempts,
             storage?.Provider, storage?.SearchMaxAgeDays, config.GetValue("Performance:SlowRequestMs", 1000), interval.TotalSeconds);
     }
 
@@ -62,8 +66,8 @@ public sealed class RuntimeMetricsLogger(ILogger<RuntimeMetricsLogger> log, ICon
         if (services.GetService(typeof(PreloadCoordinator)) is not PreloadCoordinator preload) return;
         var s = preload.GetStatus();
         if (!s.Running && s.Total == 0) return;   // idle: no line
-        log.LogInformation("preload.metrics running={Running} total={Total} completed={Completed} failed={Failed} perSec={PerSec:F2} jobs={Jobs}",
-            s.Running, s.Total, s.Completed, s.Failed, s.PerSecond, s.Jobs?.Count ?? 0);
+        log.LogInformation("preload.metrics running={Running} total={Total} completed={Completed} failed={Failed} perSec={PerSec:F2} jobs={Jobs} queuedInMemory={Queued} inFlight={InFlight}",
+            s.Running, s.Total, s.Completed, s.Failed, s.PerSecond, s.Jobs?.Count ?? 0, s.Queued, s.InFlight);
     }
 
     private static double FreeGb()

@@ -402,13 +402,17 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
                 }
 
                 var loaded = LoadCachedSearch(conn, id, DateTimeOffset.FromUnixTimeMilliseconds(cachedAtMs));
-                UrlClassifier.Warm(loaded.Captures.Select(c => c.Original).ToArray()); // parallel, so the first filter click is fast too
+                if (loaded.Captures.Length <= SearchCacheBudget.MaxWarmUrls)   // larger lists would only churn the bounded URL cache
+                    UrlClassifier.Warm(loaded.Captures.Select(c => c.Original).ToArray()); // parallel, so the first filter click is fast too
                 lock (cacheLock)   // read under the lock so a concurrent MarkSaved cannot be missed
                 {
                     LoadSaved(conn, loaded);
                     loaded.LastUsed = ++useTick;
                     searchCache[key] = loaded;
-                    while (searchCache.Count > MaxCachedSearches)
+                    // Bounded by lists AND by total captures, so a few multi-million-capture lists cannot fill RAM.
+                    // The list just loaded is always kept (the caller needs it).
+                    while (searchCache.Count > MaxCachedSearches ||
+                           (searchCache.Count > 1 && searchCache.Values.Sum(c => (long)c.Captures.Length) > SearchCacheBudget.MaxCachedCaptures))
                     {
                         var oldest = searchCache.MinBy(p => p.Value.LastUsed).Key;
                         searchCache.Remove(oldest);
@@ -816,12 +820,16 @@ public sealed partial class SqliteArchiveStore : IArchiveStore
         finally { writeLock.Release(); }
     }
 
+    /// Bounded memory per connection: 8 MB page cache, no memory map, temp/sort spill goes to TEMP (the data drive).
+    internal const string ConnectionPragmas =
+        "PRAGMA synchronous=NORMAL; PRAGMA temp_store=FILE; PRAGMA cache_size=-8192; PRAGMA mmap_size=0; PRAGMA wal_autocheckpoint=4000; PRAGMA busy_timeout=15000;";
+
     private SqliteConnection Open()
     {
         var conn = new SqliteConnection(connectionString);
         conn.Open();
         using var pragma = conn.CreateCommand();
-        pragma.CommandText = "PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-65536; PRAGMA mmap_size=268435456; PRAGMA wal_autocheckpoint=4000; PRAGMA busy_timeout=15000;";
+        pragma.CommandText = ConnectionPragmas;
         pragma.ExecuteNonQuery();
         // Free-text URL filter: the C# matcher runs inside SQL so paging stays bounded.
         conn.CreateFunction("url_match", (string? q, string? v) => SearchTextMatcher.Matches(q ?? string.Empty, v) ? 1 : 0);

@@ -24,7 +24,7 @@ public sealed class SqliteDialect : SqlDialect
     public override void PrepareConnection(DbConnection connection)
     {
         using var pragma = connection.CreateCommand();
-        pragma.CommandText = "PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-65536; PRAGMA busy_timeout=15000;";
+        pragma.CommandText = "PRAGMA synchronous=NORMAL; PRAGMA temp_store=FILE; PRAGMA cache_size=-8192; PRAGMA mmap_size=0; PRAGMA busy_timeout=15000;";
         pragma.ExecuteNonQuery();
         ((Microsoft.Data.Sqlite.SqliteConnection)connection).CreateFunction("url_match", (string? q, string? v) => WaybackViewer.Models.SearchTextMatcher.Matches(q ?? string.Empty, v) ? 1 : 0);
     }

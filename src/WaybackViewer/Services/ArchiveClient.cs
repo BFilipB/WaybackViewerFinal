@@ -148,7 +148,7 @@ public sealed class ArchiveClient : IArchiveClient
                     if (response.IsSuccessStatusCode)
                     {
                         OnSuccess();
-                        var body = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+                        var body = await ReadBodyAsync(response.Content, ct).ConfigureAwait(false);
                         log.LogDebug("archive.fetch kind={Kind} host={Host} status={Status} attempt={Attempt} waitMs={WaitMs:F0} dlMs={DlMs:F0} chars={Chars} intervalMs={IntervalMs:F0}",
                             kind, host, (int)response.StatusCode, attempt, waitMs, Stopwatch.GetElapsedTime(dlStart).TotalMilliseconds, body.Length, CurrentInterval.TotalMilliseconds);
                         return body;
@@ -171,6 +171,21 @@ public sealed class ArchiveClient : IArchiveClient
         {
             gate.Release();
         }
+    }
+
+    /// Decodes the body with the declared charset; an unknown/invalid charset (common in old archived pages) falls
+    /// back to UTF-8 instead of failing the whole download.
+    internal static async Task<string> ReadBodyAsync(HttpContent content, CancellationToken ct)
+    {
+        var bytes = await content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
+        var charset = content.Headers.ContentType?.CharSet?.Trim('"', '\'', ' ');
+        var encoding = System.Text.Encoding.UTF8;
+        if (!string.IsNullOrEmpty(charset))
+        {
+            try { encoding = System.Text.Encoding.GetEncoding(charset); }
+            catch (ArgumentException) { }   // unsupported charset name: keep UTF-8
+        }
+        return encoding.GetString(bytes);
     }
 
     private static bool IsNetworkFailure(Exception ex, CancellationToken ct) =>

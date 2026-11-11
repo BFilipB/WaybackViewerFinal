@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.DataProtection;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.Options;
@@ -21,6 +22,7 @@ public static class AppBuilder
         if (builder.Configuration["Logging:File:Directory"] is { Length: > 0 } logDir)
             builder.Logging.AddProvider(new FileLoggerProvider(logDir,
                 Enum.TryParse<LogLevel>(builder.Configuration["Logging:File:MinLevel"], out var lvl) ? lvl : LogLevel.Information));
+        RedirectTempDirectory(builder.Configuration["Storage:TempDirectory"]);
         var services = builder.Services;
         services.Configure<ArchiveOptions>(builder.Configuration.GetSection("Archive"));
         services.Configure<PreloadOptions>(builder.Configuration.GetSection("Preload"));
@@ -30,6 +32,9 @@ public static class AppBuilder
     services.AddControllersWithViews(o => { o.Filters.Add(new Microsoft.AspNetCore.Mvc.AutoValidateAntiforgeryTokenAttribute()); o.Filters.Add<WaybackViewer.Services.RequestTimingFilter>(); })
             .AddApplicationPart(typeof(HomeController).Assembly);
         // JS fetch calls send the token from the page's <meta name="request-verification-token"> in this header.
+        if (builder.Configuration["Storage:KeysDirectory"] is { Length: > 0 } keysDir)
+            services.AddDataProtection().PersistKeysToFileSystem(Directory.CreateDirectory(
+                Path.IsPathRooted(keysDir) ? keysDir : ResolveDatabasePath(keysDir)));
         services.AddAntiforgery(o => o.HeaderName = "X-CSRF-TOKEN");
         services.AddResponseCompression(o =>
         {
@@ -184,6 +189,19 @@ app.UseResponseCompression();   // big list pages and the filtered-set JSON shri
                 "Implement IArchiveStoreProvider for it and register it with AddSingleton<IArchiveStoreProvider, ...>(); " +
                 "see docs/DATABASES.md.");
         throw new InvalidOperationException($"Unknown Storage:Provider '{provider}'. Available: {available}.");
+    }
+
+    /// Points TMP/TEMP of this process at dir (created if missing). SQLite and Path.GetTempPath read these,
+    /// so temp files land on the data drive. Returns the applied folder, or null when not configured.
+    public static string? RedirectTempDirectory(string? dir)
+    {
+        if (string.IsNullOrWhiteSpace(dir)) return null;
+        var full = Path.GetFullPath(Path.IsPathRooted(dir) ? dir : ResolveDatabasePath(dir));
+        Directory.CreateDirectory(full);
+        Environment.SetEnvironmentVariable("TMP", full);
+        Environment.SetEnvironmentVariable("TEMP", full);
+        Environment.SetEnvironmentVariable("SQLITE_TMPDIR", full);
+        return full;
     }
 
     /// The drive that holds all data. Override with the WAYBACKVIEWER_DATA_ROOT environment variable.

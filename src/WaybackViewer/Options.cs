@@ -21,6 +21,9 @@ public sealed class PreloadOptions
     /// "all": download every HTML capture of the search in the background.
     public string Scope { get; set; } = "view";
     public int Workers { get; set; } = 8;
+    /// At most this many captures per job are held in memory; the rest stay in the database and are read in
+    /// keyset-paged windows as workers drain the queue. Keeps RAM flat for multi-million-capture searches.
+    public int MaxQueuedPerJob { get; set; } = 1000;
     public int WriteBatchSize { get; set; } = 50;
     public int WriteMaxDelayMs { get; set; } = 300;
     public int MaxHtmlChars { get; set; } = 5_000_000;
@@ -46,4 +49,9 @@ public sealed class StorageOptions
     public int SearchMaxAgeDays { get; set; } = 30;
     /// Optional root folder for archived compressed HTML payloads. When empty, a provider-specific default is used.
     public string? HtmlRoot { get; set; }
+    /// Folder used as the process temp directory (TMP/TEMP) so SQLite sort/index spill files and .NET temp files
+    /// stay on the data drive instead of C:. Empty = leave the system temp folder unchanged.
+    public string? TempDirectory { get; set; }
+    /// Folder for ASP.NET data-protection keys (antiforgery). Empty = framework default (%LOCALAPPDATA% on C:).
+    public string? KeysDirectory { get; set; }
 }

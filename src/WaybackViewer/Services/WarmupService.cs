@@ -32,6 +32,13 @@ public sealed class WarmupService(IArchiveStore store, FacetCache facetCache, IL
         foreach (var (prefix, filter) in recent)
         {
             ct.ThrowIfCancellationRequested();
+            // Huge lists are served by SQL paging; warming them would only hold millions of captures in RAM.
+            var head = await store.GetSearchPageAsync(prefix, filter, 0, 0, ct);
+            if (head is null || head.TotalCount > SearchCacheBudget.MaxWarmCaptures)
+            {
+                log.LogInformation("warmup.skipped prefix={Prefix} captures={Count}", prefix, head?.TotalCount);
+                continue;
+            }
             var snapshot = await store.GetSearchAsync(prefix, filter, ct);
             if (snapshot is not null) { facetCache.GetOrBuild(snapshot); warmed++; }
         }

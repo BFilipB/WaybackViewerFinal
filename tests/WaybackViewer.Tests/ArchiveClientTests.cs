@@ -185,4 +185,14 @@ public class ArchiveClientTests
         var ex = await Assert.ThrowsAsync<ArchiveRequestException>(() => client.GetStringAsync("https://x/limited"));
         Assert.Equal(TimeSpan.FromSeconds(9), ex.RetryAfter);
     }
+
+    [Fact]
+    public async Task GetStringAsync_InvalidCharset_FallsBackToUtf8()
+    {
+        var (client, handler, _) = Create();
+        handler.Enqueue(HttpStatusCode.OK, "héllo", r =>
+            r.Content.Headers.ContentType = new MediaTypeHeaderValue("text/html") { CharSet = "x-bogus-charset" });
+        Assert.Equal("héllo", await client.GetStringAsync("https://x/1"));
+        Assert.Equal(1, handler.Calls);
+    }
 }
