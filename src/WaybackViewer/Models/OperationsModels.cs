@@ -33,9 +33,15 @@ public sealed record OperationsPageModel(
     int Page,
     int PageSize,
     string? StateFilter,
-    string? TypeFilter)
+    string? TypeFilter,
+	string? Search = null,
+	string Sort = "updated",
+	bool Descending = true,
+    int AllTotal = 0)
 {
     public int PageCount => Math.Max(1, (Total + PageSize - 1) / PageSize);
+    /// True when a search or filter hides some URLs (bulk "all" actions still act on every URL).
+    public bool Narrowed => Search is not null || StateFilter is not null || TypeFilter is not null;
 }
 
 /// Selected rows for a bulk action. All = every searched URL (ignores Keys).

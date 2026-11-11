@@ -41,6 +41,13 @@ Set the provider name and connection string in `appsettings.json`, or with envir
 2. Register it with the provider selection so it has a name.
 3. Run the shared store contract tests against it. The same scenarios run on SQLite, memory and PostgreSQL.
 
+### SQL features the shared queries rely on
+
+- `LIMIT @limit OFFSET @offset` paging.
+- `LIKE ... ESCAPE '\'`: the Operations search escapes `\`, `%` and `_` with a backslash.
+- `LOWER(...)`: the Operations search lowercases both sides because `LIKE` is case-sensitive on PostgreSQL.
+- `MIN(CASE State WHEN ... END)` in `ORDER BY`: the Operations **State** sort (`OperationStates.SortRankSql`).
+
 ## Testing
 
 - SQLite and memory contract tests run locally.

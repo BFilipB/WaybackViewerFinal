@@ -84,6 +84,8 @@ public class PostgresStoreTests
         Assert.True(op.IsActive);
         Assert.Equal(op.Id, (await store.CreateOrGetOperationAsync(tag, "html200", Models.OperationKind.PagePreload, DateTimeOffset.UtcNow)).Id);
         Assert.Contains(await store.GetOperationsAsync(true), o => o.Id == op.Id);
+        var found = await store.ListOperationSearchesAsync(new Models.OperationListQuery(null, null, 0, 10, tag.ToUpperInvariant()));
+        Assert.Contains(found.Searches, s => s.Prefix == tag);              // LIKE is case-sensitive on PostgreSQL; the query lowercases
 
         var c = SampleData.Capture(1);
         await store.SavePagesAsync([new Models.NewPage(c, HtmlCodec.Compress("<p>zebra</p>"),

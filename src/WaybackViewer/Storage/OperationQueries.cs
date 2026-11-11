@@ -50,6 +50,11 @@ internal static class OperationQueries
         using var count = conn.CreateCommand();
         In(count, "Kind", "k", query.Kinds);
         In(count, "State", "s", query.States);
+		if (!string.IsNullOrWhiteSpace(query.Search))
+		{
+			where.Append(" AND (LOWER(UrlPrefix) LIKE @q ESCAPE '\\' OR LOWER(Filter) LIKE @q ESCAPE '\\')");
+			Add(count, "@q", "%" + EscapeLike(query.Search.Trim().ToLowerInvariant()) + "%");
+		}
         var condition = where.ToString();
         count.CommandText = $"SELECT COUNT(*) FROM (SELECT UrlPrefix, Filter FROM Operations WHERE {condition} GROUP BY UrlPrefix, Filter) t";
         var total = Convert.ToInt32(count.ExecuteScalar());
@@ -58,7 +63,7 @@ internal static class OperationQueries
         foreach (DbParameter p in count.Parameters) Add(page, p.ParameterName, p.Value!);
         page.CommandText = $"""
             SELECT UrlPrefix, Filter, MAX(UpdatedAt) AS LastUpdate FROM Operations WHERE {condition}
-            GROUP BY UrlPrefix, Filter ORDER BY LastUpdate DESC, UrlPrefix, Filter LIMIT @limit OFFSET @offset
+            GROUP BY UrlPrefix, Filter ORDER BY {OrderBy(query)} LIMIT @limit OFFSET @offset
             """;
         Add(page, "@limit", Math.Max(0, query.Limit));
         Add(page, "@offset", Math.Max(0, query.Offset));
@@ -68,7 +73,21 @@ internal static class OperationQueries
         return new OperationSearchPage(result, total);
     }
 
-    /// Callers pass one page of rows (bounded by the page size).
+    private static string OrderBy(OperationListQuery query)
+	{
+		var dir = query.Descending ? "DESC" : "ASC";
+		return query.Sort switch
+		{
+			OperationSort.Url => $"UrlPrefix {dir}, Filter {dir}",
+			OperationSort.State => $"MIN({OperationStates.SortRankSql}) {(query.Descending ? "ASC" : "DESC")}, UrlPrefix, Filter",
+			_ => $"LastUpdate {dir}, UrlPrefix, Filter"
+		};
+	}
+
+	internal static string EscapeLike(string text) =>
+        text.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+
+	/// Callers pass one page of rows (bounded by the page size).
     public static IReadOnlyList<BackgroundOperation> ForSearches(DbConnection conn, IReadOnlyCollection<SearchKey> searches,
         Func<DbDataReader, BackgroundOperation> read)
     {

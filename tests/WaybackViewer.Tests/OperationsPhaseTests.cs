@@ -149,6 +149,37 @@ public class ScopedOperationQueryTests
         }
         finally { Cleanup(dir); }
     }
+
+    [Theory, MemberData(nameof(Stores))]
+    public async Task Searches_can_be_searched_and_sorted(string kind)
+    {
+        var (store, dir) = await CreateAsync(kind);
+        try
+        {
+            await Op(store, "alpha.com/", OperationKind.PagePreload, OperationState.Completed, 1);
+            await Op(store, "beta.com/", OperationKind.PagePreload, OperationState.Running, 2);
+            await Op(store, "100%_off.com/", OperationKind.PagePreload, OperationState.Completed, 3);
+
+            var hit = await store.ListOperationSearchesAsync(new OperationListQuery(null, null, 0, 10, "ALPH"));
+            Assert.Equal(["alpha.com/"], hit.Searches.Select(s => s.Prefix));
+            Assert.Equal(1, hit.Total);
+
+            var literal = await store.ListOperationSearchesAsync(new OperationListQuery(null, null, 0, 10, "%_"));
+            Assert.Equal(["100%_off.com/"], literal.Searches.Select(s => s.Prefix));
+
+            var byUrl = await store.ListOperationSearchesAsync(new OperationListQuery(null, null, 0, 10, null, OperationSort.Url, false));
+            Assert.Equal(["100%_off.com/", "alpha.com/", "beta.com/"], byUrl.Searches.Select(s => s.Prefix));
+
+            var oldest = await store.ListOperationSearchesAsync(new OperationListQuery(null, null, 0, 10, null, OperationSort.Updated, false));
+            Assert.Equal("alpha.com/", oldest.Searches[0].Prefix);
+
+            var urgent = await store.ListOperationSearchesAsync(new OperationListQuery(null, null, 0, 10, null, OperationSort.State, true));
+            Assert.Equal("beta.com/", urgent.Searches[0].Prefix);                // Running sorts first
+            var calm = await store.ListOperationSearchesAsync(new OperationListQuery(null, null, 0, 10, null, OperationSort.State, false));
+            Assert.Equal("beta.com/", calm.Searches[^1].Prefix);
+        }
+        finally { Cleanup(dir); }
+    }
 }
 
 public class PauseAcrossRestartTests

@@ -12,6 +12,7 @@
 - `Services/PreloadCoordinator.cs` – hosted service; background page preload workers, save channel, operation tracking and resume on startup.
 - `Services/PageService.cs`, `PageLoader.cs` – on-demand page loading.
 - `Storage/*` – `IArchiveStore` with SQLite (default) and SQL dialect abstraction; `HtmlFileStore` for HTML payloads.
+- `Controllers/OperationsController.cs` + `Views/Operations/Index.cshtml` + `Storage/OperationQueries.cs` - Operations page; search (case-insensitive, escaped `LIKE`), sort and filters run in SQL. Bulk "all" actions intentionally act on every URL regardless of search/filters, and the page must say so.
 - `Controllers/HomeController.cs` + `Views/Home/Index.cshtml` – UI, unified `WorkflowStatus` endpoint, operation controls.
 
 ## Product rules (must follow)

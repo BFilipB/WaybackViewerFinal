@@ -159,7 +159,9 @@ public readonly record struct SearchKey(string Prefix, string Filter);
 
 /// Operations page query: which searched URLs to list. Null Kinds/States = no filter.
 public sealed record OperationListQuery(IReadOnlyList<OperationKind>? Kinds, IReadOnlyList<OperationState>? States,
-    int Offset, int Limit);
+    int Offset, int Limit, string? Search = null, OperationSort Sort = OperationSort.Updated, bool Descending = true);
+
+public enum OperationSort { Updated, Url, State }
 
 public sealed record OperationSearchPage(IReadOnlyList<SearchKey> Searches, int Total);
 

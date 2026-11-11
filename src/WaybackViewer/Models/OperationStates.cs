@@ -10,6 +10,22 @@ namespace WaybackViewer.Models;
 /// Legacy Stopping/Stopped rows from older databases behave like Paused.
 public static class OperationStates
 {
+    /// Operations page "State" sort order, most urgent first: Running, Queued, Paused, Failed, CompletedWithFailures, Completed, Deleting.
+    public static int SortRank(OperationState state) => state switch
+    {
+        OperationState.Running => 0,
+        OperationState.Queued or OperationState.Interrupted => 1,
+        OperationState.Paused or OperationState.Stopping or OperationState.Stopped => 2,
+        OperationState.Failed => 3,
+        OperationState.CompletedWithFailures => 4,
+        OperationState.Completed => 5,
+        _ => 6
+    };
+
+    /// SQL form of <see cref="SortRank"/> over the integer State column (generated from the enum, no user input).
+    public static readonly string SortRankSql = "CASE State " + string.Concat(Enum.GetValues<OperationState>()
+        .Select(s => $"WHEN {(int)s} THEN {SortRank(s)} ")) + "ELSE 6 END";
+
     /// Unfinished: holds the (kind, url) slot, so a second request reuses it instead of starting a duplicate.
     public static bool IsActive(OperationState state) => state is OperationState.Queued or OperationState.Running
         or OperationState.Paused or OperationState.Interrupted or OperationState.Stopping or OperationState.Stopped

@@ -73,13 +73,29 @@ public interface IArchiveStore
     /// One page of searched URLs that have operations, most recently updated first.
     async Task<OperationSearchPage> ListOperationSearchesAsync(OperationListQuery query, CancellationToken ct = default)
     {
-        var all = (await GetOperationsAsync(false, ct).ConfigureAwait(false))
-            .Where(o => query.Kinds is null || query.Kinds.Contains(o.Kind))
-            .Where(o => query.States is null || query.States.Contains(o.State))
-            .GroupBy(o => new SearchKey(o.Prefix, o.Filter))
-            .OrderByDescending(g => g.Max(o => o.UpdatedAt)).ThenBy(g => g.Key.Prefix, StringComparer.Ordinal)
-            .ThenBy(g => g.Key.Filter, StringComparer.Ordinal)
-            .Select(g => g.Key).ToList();
+        var search = query.Search?.Trim();
+		var groups = (await GetOperationsAsync(false, ct).ConfigureAwait(false))
+			.Where(o => query.Kinds is null || query.Kinds.Contains(o.Kind))
+			.Where(o => query.States is null || query.States.Contains(o.State))
+			.Where(o => string.IsNullOrEmpty(search)
+				|| o.Prefix.Contains(search, StringComparison.OrdinalIgnoreCase)
+				|| o.Filter.Contains(search, StringComparison.OrdinalIgnoreCase))
+			.GroupBy(o => new SearchKey(o.Prefix, o.Filter));
+		IOrderedEnumerable<IGrouping<SearchKey, BackgroundOperation>> ordered = query.Sort switch
+		{
+			OperationSort.Url => query.Descending
+				? groups.OrderByDescending(g => g.Key.Prefix, StringComparer.Ordinal).ThenByDescending(g => g.Key.Filter, StringComparer.Ordinal)
+				: groups.OrderBy(g => g.Key.Prefix, StringComparer.Ordinal).ThenBy(g => g.Key.Filter, StringComparer.Ordinal),
+			OperationSort.State => query.Descending
+				? groups.OrderBy(g => g.Min(o => OperationStates.SortRank(o.State)))
+				: groups.OrderByDescending(g => g.Min(o => OperationStates.SortRank(o.State))),
+			_ => query.Descending
+				? groups.OrderByDescending(g => g.Max(o => o.UpdatedAt))
+				: groups.OrderBy(g => g.Max(o => o.UpdatedAt))
+		};
+		var all = ordered.ThenBy(g => g.Key.Prefix, StringComparer.Ordinal)
+			.ThenBy(g => g.Key.Filter, StringComparer.Ordinal)
+			.Select(g => g.Key).ToList();
         return new OperationSearchPage(all.Skip(Math.Max(0, query.Offset)).Take(Math.Max(0, query.Limit)).ToList(), all.Count);
     }
 

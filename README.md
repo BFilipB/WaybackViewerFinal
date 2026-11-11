@@ -463,11 +463,12 @@ Open it by clicking a URL name in Searched URLs. The header shows the prefix, it
 
 1. Click **Operations**. Each row summarizes work for a searched URL/filter, rather than representing one capture.
 2. Use the state filter (**All states**, **Active**, **Paused**, **Completed**, **With failures**) and type filter (**All types**, **Capture list**, **Page preload**) to find work. Capture list includes refresh jobs.
-3. Read both progress bars, then **Saved**, **Skipped**, **Failed**, **Pending**, **Speed**, **ETA**, and **Last error**. ETA is an estimate, not a deadline.
-4. Use a row's **Pause/Resume**, **Retry**, or **Refresh** for that row. Click its URL to return to the viewer.
-5. For several URLs, tick their checkboxes and use selected actions (**Pause**, **Resume**, **Retry failed**, **Refresh selected**). The select-all checkbox selects the current page, not every URL in the database.
-6. **Pause all**, **Resume all**, and **Retry all failed** have broader scope than the selected checkboxes: treat them as all-URL actions, not current-page actions.
-7. Use **Prev** and **Next** for more operation rows. Updates arrive live, with polling as a fallback; a brief delay after a command is normal.
+3. Use the **search box** to show only URLs whose prefix or filter contains your text (not case-sensitive; `%` and `_` are matched literally). Choose **Sort by** (**Last updated**, **URL**, **State**) and a **direction**, then **Apply**. For **State**, descending means most urgent first: Running, Queued, Paused, Failed, Completed with failures, Completed. **Clear** removes only the search. Search, sort and filters live in the page address, so the pager keeps them and you can bookmark the view.
+4. Read both progress bars, then **Saved**, **Skipped**, **Failed**, **Pending**, **Speed**, **ETA**, and **Last error**. ETA is an estimate, not a deadline.
+5. Use a row's **Pause/Resume**, **Retry**, or **Refresh** for that row. Click its URL to return to the viewer.
+6. For several URLs, tick their checkboxes and use selected actions (**Pause**, **Resume**, **Retry failed**, **Refresh selected**). The select-all checkbox selects the current page, not every URL in the database.
+7. **Pause all**, **Resume all**, and **Retry all failed** always act on **every** searched URL, never only the rows you see. They sit in a pill labelled **ALL N URLS** with a pulsing dot. When a search or filter hides rows, the pill turns amber and warns how many URLs will really be affected (for example *affects 40, not just the 3 shown*). To act only on visible rows, tick them and use the *selected* buttons.
+8. Use **Prev** and **Next** for more operation rows. Updates arrive live, with polling as a fallback; a brief delay after a command is normal.
 
 **Deleting data is different from pausing:**
 

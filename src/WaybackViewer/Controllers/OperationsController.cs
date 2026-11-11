@@ -13,6 +13,7 @@ public class OperationsController(IArchiveStore store, PreloadCoordinator preloa
 {
     public const int DefaultPageSize = 25;
     public const int MaxBulk = 200;
+	public const int MaxSearchLength = 200;
 
     private static readonly Dictionary<string, OperationState[]> StateFilters = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -30,9 +31,9 @@ public class OperationsController(IArchiveStore store, PreloadCoordinator preloa
 
     [HttpGet("")]
     public async Task<IActionResult> Index(string? state = null, string? type = null, int page = 1, int pageSize = DefaultPageSize,
-        CancellationToken ct = default)
+        string? q = null, string? sort = null, string? dir = null, CancellationToken ct = default)
     {
-        var model = await LoadAsync(state, type, page, pageSize, ct);
+        var model = await LoadAsync(state, type, page, pageSize, ct, q, sort, dir);
         return View(model);
     }
 
@@ -135,17 +136,27 @@ public class OperationsController(IArchiveStore store, PreloadCoordinator preloa
         return result.Distinct().ToList();
     }
 
-    internal async Task<OperationsPageModel> LoadAsync(string? state, string? type, int page, int pageSize, CancellationToken ct)
+    internal async Task<OperationsPageModel> LoadAsync(string? state, string? type, int page, int pageSize, CancellationToken ct,
+        string? search = null, string? sort = null, string? dir = null)
     {
+        search = search?.Trim();
+        if (string.IsNullOrEmpty(search)) search = null;
+        else if (search.Length > MaxSearchLength) search = search[..MaxSearchLength];
+        var order = Enum.TryParse<OperationSort>(sort, true, out var parsedSort) && Enum.IsDefined(parsedSort) ? parsedSort : OperationSort.Updated;
+        var descending = !string.Equals(dir, "asc", StringComparison.OrdinalIgnoreCase);
         pageSize = Math.Clamp(pageSize, 10, 100);
         page = Math.Max(1, page);
         var states = state is not null && StateFilters.TryGetValue(state, out var s) ? s : null;
         var kinds = type is not null && TypeFilters.TryGetValue(type, out var t) ? t : null;
 
-        var result = await store.ListOperationSearchesAsync(new OperationListQuery(kinds, states, (page - 1) * pageSize, pageSize), ct);
+        var result = await store.ListOperationSearchesAsync(new OperationListQuery(kinds, states, (page - 1) * pageSize, pageSize, search, order, descending), ct);
         var ops = await store.GetOperationsForSearchesAsync(result.Searches, ct);
+        // Bulk "all" actions ignore search/filters, so the page shows how many URLs they really affect.
+        var allTotal = search is null && states is null && kinds is null ? result.Total
+            : (await store.ListOperationSearchesAsync(new OperationListQuery(null, null, 0, 0), ct)).Total;
         return new OperationsPageModel(BuildRows(result.Searches, ops), result.Total, page, pageSize,
-            states is null ? null : state!.ToLowerInvariant(), kinds is null ? null : type!.ToLowerInvariant());
+            states is null ? null : state!.ToLowerInvariant(), kinds is null ? null : type!.ToLowerInvariant(),
+			search, order.ToString().ToLowerInvariant(), descending, allTotal);
     }
 
     private IReadOnlyList<OperationRow> BuildRows(IReadOnlyList<SearchKey> keys, IReadOnlyList<BackgroundOperation> ops)

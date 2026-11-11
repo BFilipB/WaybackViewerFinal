@@ -6,6 +6,9 @@
 		var parts = new List<string> { "page=" + page, "pageSize=" + Model.PageSize };
 		if (state is not null) parts.Add("state=" + Uri.EscapeDataString(state));
 		if (type is not null) parts.Add("type=" + Uri.EscapeDataString(type));
+		if (!string.IsNullOrEmpty(Model.Search)) parts.Add("q=" + Uri.EscapeDataString(Model.Search));
+		parts.Add("sort=" + Model.Sort);
+		parts.Add("dir=" + (Model.Descending ? "desc" : "asc"));
 		return "/operations?" + string.Join("&", parts);
 	}
 	string Eta(double? seconds) => seconds is null ? "–" : TimeSpan.FromSeconds(seconds.Value).ToString(seconds.Value >= 3600 ? @"h\:mm\:ss" : @"m\:ss");
@@ -36,10 +39,33 @@
 	}
   </nav>
 
+  <form method="get" action="/operations" class="ops-filters" role="search">
+    <input type="search" name="q" value="@Model.Search" maxlength="200" placeholder="Search URL or filter" aria-label="Search operations" />
+    <select name="sort" aria-label="Sort by">
+      <option value="updated" selected="@(Model.Sort == "updated")">Last updated</option>
+      <option value="url" selected="@(Model.Sort == "url")">URL</option>
+      <option value="state" selected="@(Model.Sort == "state")">State</option>
+    </select>
+    <select name="dir" aria-label="Sort direction">
+      <option value="desc" selected="@Model.Descending">Descending</option>
+      <option value="asc" selected="@(!Model.Descending)">Ascending</option>
+    </select>
+    <input type="hidden" name="pageSize" value="@Model.PageSize" />
+    @if (Model.StateFilter is not null) { <input type="hidden" name="state" value="@Model.StateFilter" /> }
+    @if (Model.TypeFilter is not null) { <input type="hidden" name="type" value="@Model.TypeFilter" /> }
+    <button type="submit">Apply</button>
+    @if (!string.IsNullOrEmpty(Model.Search)) { <a href="@(Qs(1, Model.StateFilter, Model.TypeFilter).Replace("q=" + Uri.EscapeDataString(Model.Search) + "&", ""))">Clear</a> }
+  </form>
+
   <div class="ops-bulk">
-	<button type="button" data-bulk="pause" data-all="true">Pause all</button>
+	<span class="ops-scope@(Model.Narrowed ? " narrowed" : "")" role="group" aria-label="Actions for every searched URL"
+      title="Pause all, Resume all and Retry all failed act on every searched URL. Search and filters only change which rows are shown.">
+      <span class="ops-scope-tag"><span class="ops-scope-dot" aria-hidden="true"></span>All @Model.AllTotal URLs</span>
+      <button type="button" data-bulk="pause" data-all="true">Pause all</button>
 	<button type="button" data-bulk="resume" data-all="true">Resume all</button>
 	<button type="button" data-bulk="retry-failed" data-all="true">Retry all failed</button>
+      @if (Model.Narrowed) { <span class="ops-scope-note">&#9888; ignores your search/filters &mdash; affects @Model.AllTotal, not just the @Model.Total shown</span> }
+    </span>
 	<span class="sep">|</span>
 	<span id="opsSelected">0 selected</span>
 	<button type="button" data-bulk="pause">Pause selected</button>
@@ -117,6 +143,16 @@
   .ops-completed { color: var(--ok); }
   .ops-failed, .ops-completedwithfailures { color: #ff9d9d; }
   .ops-paused { color: var(--muted); }
+  .ops-scope { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 3px 10px 3px 4px; border-radius: 999px;
+    border: 1px dashed var(--accent); background: linear-gradient(90deg, rgba(120,170,255,.12), transparent); }
+  .ops-scope.narrowed { border-style: solid; border-color: #f5b041; background: linear-gradient(90deg, rgba(245,176,65,.16), transparent); }
+  .ops-scope-tag { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: bold;
+    text-transform: uppercase; letter-spacing: .04em; background: var(--accent); color: #fff; }
+  .ops-scope.narrowed .ops-scope-tag { background: #f5b041; color: #222; }
+  .ops-scope-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: ops-pulse 1.6s ease-in-out infinite; }
+  .ops-scope-note { font-size: 11px; color: #f5b041; }
+  @@keyframes ops-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.6); } }
+  @@media (prefers-reduced-motion: reduce) { .ops-scope-dot { animation: none; } }
 </style>
 
 <script>
