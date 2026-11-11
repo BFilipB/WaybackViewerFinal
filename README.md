@@ -216,7 +216,7 @@ With the default `Preload:Scope=view`, the app queues downloads needed by the cu
 1. Pick a **Popularity metric** (views, likes, comments, engagement, score) and a **Sort** mode. Most/least variants are available.
 2. Use the **Top 10 / 25 / 50%** presets or minimum/maximum values; the histogram shows the distribution. A maximum of 0 means no upper limit.
 3. Unknown counts are not measured zeros. Undownloaded pages can receive an archive-only estimate; a live notice shows pending downloads. Exact filters exclude estimates by default; select **include estimates** to allow them.
-4. Exports (`Home/CaptureSet`) honor the same sort/filter. Example: `/?url=example.com/&sort=liked&popularityMetric=likes&minPopularity=15`
+4. Exports (`Home/Export`, `Home/CaptureSet`) honor the same sort/filter. Example: `/?url=example.com/&sort=liked&popularityMetric=likes&minPopularity=15`
 
 The coverage line reports measured counts on N of M captures; unused metrics with no measured coverage are disabled. High/Med/Low confidence badges and row tooltips explain the evidence; estimated values use `~`.
 
@@ -554,7 +554,13 @@ Files include the original URL, archive link, capture timestamp, title, descript
 | `csv` | Quoted columns suitable for spreadsheet import. Treat archived content as untrusted data when opening it in spreadsheet software. |
 | `xls` | An HTML table with an `.xls` extension, not a native modern `.xlsx` workbook. Spreadsheet software may warn that the format and extension differ. |
 
-The capture-set endpoint streams server results in batches, but the browser's export code collects records and builds the output file in memory. Very large exports can use significant browser memory; narrow the filters or export smaller sets if needed. The all-filtered slideshow also retrieves a capture-set list in the browser.
+**Export all filtered** downloads `/Home/Export`: the server walks the filtered set in 2,000-row SQL pages, loads each capture's text one at a time and writes each record straight to the response. The browser's download manager saves the stream, so the page holds no capture list, text records or file in memory, whatever the size. Closing the tab or cancelling the download stops the server work. Captures whose text cannot be loaded get an `Error` column/field instead of aborting the export.
+
+**Export page** (current page only) still builds the file in the browser; it is at most one page of rows. The all-filtered slideshow requests at most 5,000 captures (`/Home/CaptureSet?max=5000`); narrow the filters to see others.
+
+### Measuring browser memory
+
+Firefox Task Manager and Windows Task Manager add up all Firefox processes and allocator memory that Firefox keeps after large pages are freed, so a high number does not by itself mean a WaybackViewer tab is leaking. To check: open `about:memory`, click **Measure**, and look under the `localhost` content process (`webIsolated=http://localhost`). Measure in a fresh profile/window with only WaybackViewer open. Hidden tabs stop the live event stream and slow polling, and the Operations page coalesces refreshes, so an idle Operations tab should stay in the tens of megabytes.
 
 ---
 
@@ -712,7 +718,8 @@ Use environment variables with `__` separators for deployment overrides, or loca
 
 ### Capture APIs
 
-- `GET /Home/CaptureSet` (full filtered set as JSON, streamed from SQL in 2,000-row pages, so memory stays bounded for any list size)
+- `GET /Home/CaptureSet` (full filtered set as JSON, streamed from SQL in 2,000-row pages, so memory stays bounded for any list size; optional `max` caps the rows)
+- `GET /Home/Export?format=xls|csv|json|txt` (text/metadata export of the full filtered set, written one capture at a time as a download; same filter/sort parameters as `CaptureSet`)
 - `GET /Home/History` (newest 60 captures of one URL, one bounded SQL query)
 - `GET /Home/KnownUrls`
 - `GET /Home/Text`
@@ -726,7 +733,7 @@ Use environment variables with `__` separators for deployment overrides, or loca
 - **Server-side paging:** the capture table renders one page only. Supported persistent-store paths apply structural filters, searching, ranking and counts in SQL; fallback/provider-specific paths may perform some work in memory before rendering the current page. Rendering one page does not mean every operation is constant-time.
 - **Free-text URL search in SQL:** SQLite registers the app's own matcher (Cyrillic/Latin transliteration, accent folding) as a `url_match` SQL function, so results equal the in-memory matcher. Databases without it (PostgreSQL) fall back to the in-memory path for that filter only.
 - **Popularity in SQL:** per-capture archive signals are persisted (`CaptureSignals`) and rebuilt when a list is refreshed; ranking, raw-value thresholds, presets and histogram are SQL; within-tier percentile/confidence weighting affects sorting.
-- **Bounded server work where supported:** history is limited, unsaved-page downloads are read in batches, capture-set responses stream in pages, and several caches have explicit limits. Browser exports still assemble the final file in memory.
+- **Bounded server work where supported:** history is limited, unsaved-page downloads are read in batches, capture-set responses stream in pages, and several caches have explicit limits. Filtered exports stream from `/Home/Export`; only the current-page export is built in the browser.
 - Performance tests exercise large lists, including 100,000-capture fixtures. Timings depend on hardware, warm caches, database size and concurrent work; they are not an end-user latency guarantee.
 - SQLite runs in WAL mode with tuned pragmas; responses are compressed and support ETag/304.
 

@@ -39,4 +39,13 @@ public class FrontendMemoryTests
         Assert.Contains("TEXT_CACHE_MAX = 24", home);
         Assert.Contains("if (document.hidden) { wfLater(10000); return; }", home);
     }
+
+    [Fact]
+    public void Filtered_export_streams_from_the_server_and_slideshow_list_is_capped()
+    {
+        var home = View("Home", "Index.cshtml");
+        Assert.Contains("a.href = '/Home/Export?'", home);
+        Assert.DoesNotContain("await exportText(all)", home);
+        Assert.Contains("params.set('max', String(SHOW_MAX))", home);
+    }
 }

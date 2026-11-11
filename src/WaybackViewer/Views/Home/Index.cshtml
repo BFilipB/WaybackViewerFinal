@@ -782,15 +782,23 @@ else if (Model.CachedAt is not null)
     ).join('');
   }
 
-  async function fetchCaptureSet() {
+  const SHOW_MAX = 5000; // all-filtered slideshow: bounded list (large exports stream from /Home/Export)
+  function captureSetParams() {
     const q = new URLSearchParams(location.search);
     const url = q.get('url') || searchBar?.querySelector('[name=url]')?.value || '';
-    if (!url) return [];
+    if (!url) return null;
     const params = new URLSearchParams();
     params.set('url', url);
     params.set('filter', q.get('filter') || searchBar?.querySelector('[name=filter]')?.value || 'html200');
     params.set('searchMode', q.get('searchMode') || searchBar?.querySelector('[name=searchMode]')?.value || 'url');
     ['year','category','status','section','q','type','unique','sort','popularityMetric','minPopularity','maxPopularity','includeEstimates'].forEach(k => { const v = q.get(k); if (v) params.set(k, v); });
+    return params;
+  }
+
+  async function fetchCaptureSet() {
+    const params = captureSetParams();
+    if (!params) return [];
+    params.set('max', String(SHOW_MAX));
     const r = await fetch('/Home/CaptureSet?' + params.toString());
 
 
@@ -850,6 +858,18 @@ else if (Model.CachedAt is not null)
       setExportButtonsBusy(false);
     }
   }
+  // Full filtered export is written by the server one capture at a time and saved by the browser's download manager,
+  // so no capture list, text records or Blob is held in page memory.
+  function downloadFilteredExport() {
+    const params = captureSetParams();
+    if (!params) { alert('No captures available.'); return; }
+    params.set('format', byId('expFmt')?.value || 'xls');
+    const a = document.createElement('a');
+    a.href = '/Home/Export?' + params.toString();
+    a.download = '';
+    a.click();
+    byId('expStatus').textContent = 'Export download started (streamed by the server; see the browser downloads list).';
+  }
   const expAll = byId('expAll');
   function openExportWindow(mode) {
     const now = Date.now();
@@ -870,13 +890,7 @@ else if (Model.CachedAt is not null)
   const expAllFiltered = byId('expAllFiltered');
   if (expAllFiltered) expAllFiltered.onclick = async () => {
     if (exporting) return;
-    if (openExportWindow('filtered')) return;
-    try {
-      const all = await fetchCaptureSet();
-      await exportText(all);
-    } catch (e) {
-      byId('expStatus').textContent = (e && e.message) ? e.message : 'Could not export full filtered set.';
-    }
+    downloadFilteredExport();
   };
 
   async function maybeAutoStartExportFromQuery() {
@@ -899,8 +913,7 @@ else if (Model.CachedAt is not null)
 
     try {
       if (mode === 'filtered') {
-        const all = await fetchCaptureSet();
-        await exportText(all);
+        downloadFilteredExport();
       } else {
         await exportText(cards);
       }

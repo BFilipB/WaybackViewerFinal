@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Capture = WaybackViewer.Models.Capture;
 using WaybackViewer.Storage;
 
@@ -48,8 +48,35 @@ public class ExportAndHistoryHttpTests
         Assert.Equal(60, rows.Count);
         Assert.Equal(rows.OrderByDescending(r => r, StringComparer.Ordinal), rows);
     }
+
+    [Fact]
+    public async Task CaptureSet_max_caps_the_list_for_the_slideshow()
+    {
+        await using var host = await HostAsync(300);
+        var json = await host.GetAsync("/Home/CaptureSet?url=example.com/&max=50");
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(50, doc.RootElement.GetArrayLength());
+    }
+
+    [Fact]
+    public async Task Export_endpoint_streams_a_valid_json_file_with_one_record_per_capture()
+    {
+        await using var host = await HostAsync(30);
+        var json = await host.GetAsync("/Home/Export?url=example.com/&section=%2Fblog&format=json");
+        using var doc = JsonDocument.Parse(json);
+        Assert.Equal(10, doc.RootElement.GetArrayLength());
+        Assert.All(doc.RootElement.EnumerateArray(), e =>
+        {
+            Assert.Contains("/blog/", e.GetProperty("url").GetString());
+            Assert.StartsWith("https://web.archive.org/web/", e.GetProperty("archive").GetString());
+        });
+    }
+
+    [Fact]
+    public async Task Export_endpoint_rejects_invalid_prefix()
+    {
+        await using var host = await AppHost.StartAsync();
+        var response = await host.Client.GetAsync("/Home/Export?url=");
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, response.StatusCode);
+    }
 }
-
-
-
-

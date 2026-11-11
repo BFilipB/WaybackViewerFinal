@@ -534,90 +534,149 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
         return results;
     }
 
-    /// Full capture set for the current query/filter/facets, independent of current page rendering.
-    public async Task<IActionResult> CaptureSet(string url, string? filter,
-        string? year = null, string? category = null, string? status = null, string? section = null, string? q = null,
-        string? searchMode = null, string? type = null, string? unique = null, string? sort = null,
-        string? popularityMetric = null, int minPopularity = 0, bool includeEstimates = false, int maxPopularity = 0, CancellationToken ct = default)
-    {
-        var prefix = UrlInput.NormalizePrefix(url ?? "");
-        if (prefix is null) return BadRequest();
-        var activeFilter = UrlInput.NormalizeFilter(filter);
+	/// Full capture set for the current query/filter/facets, independent of current page rendering.
+	/// max (0 = unlimited) caps the list for browser consumers such as the slideshow.
+	public async Task<IActionResult> CaptureSet(string url, string? filter,
+		string? year = null, string? category = null, string? status = null, string? section = null, string? q = null,
+		string? searchMode = null, string? type = null, string? unique = null, string? sort = null,
+		string? popularityMetric = null, int minPopularity = 0, bool includeEstimates = false, int maxPopularity = 0,
+		int max = 0, CancellationToken ct = default)
+	{
+		var prefix = UrlInput.NormalizePrefix(url ?? "");
+		if (prefix is null) return BadRequest();
+		var query = new CaptureSetQuery(prefix, UrlInput.NormalizeFilter(filter), year, category, status, section, q,
+			searchMode, type, unique, sort, popularityMetric, minPopularity, includeEstimates, maxPopularity);
 
-        var mode = NormalizeSearchMode(searchMode);
-        var exportContent = IsContentSearch(mode, q);
-        var exportFilter = new CaptureFilter(Clean(year), Clean(category), Clean(status), Clean(section),
-        	exportContent ? null : Clean(q), UrlClassifier.NormalizeKind(type), IsTrue(unique));
-        var streamSort = NormalizeSortMode(sort);
-        var streamMetric = NormalizePopularityMetric(popularityMetric);
-        var streamPopularity = streamSort != "newest" || streamMetric != "none"
-        	? new PopularityQuery(streamSort, streamMetric, streamMetric == "none" ? 0 : Math.Max(0, minPopularity), includeEstimates, streamMetric == "none" ? 0 : Math.Max(0, maxPopularity)) : null;
+		Response.ContentType = "application/json; charset=utf-8";
+		await using var json = new System.Text.Json.Utf8JsonWriter(Response.Body);
+		json.WriteStartArray();
+		var written = 0;
+		await foreach (var c in EnumerateCaptureSetAsync(query, ct))
+		{
+			if (max > 0 && written >= max) break;
+			json.WriteStartObject();
+			json.WriteString("ts", c.Capture.Timestamp);
+			json.WriteString("url", c.Capture.Original);
+			json.WriteBoolean("ready", c.Ready);   // archive / frame links are derived in the browser
+			json.WriteEndObject();
+			if (++written % 2000 == 0) await json.FlushAsync(ct);
+		}
+		json.WriteEndArray();
+		await json.FlushAsync(ct);
+		return new EmptyResult();
+	}
 
-        // Streamed from SQL one page at a time: memory stays bounded however large the list is.
-        var urlText = exportFilter.Text;   // matched per row in C# (SearchTextMatcher); SQL pages stay bounded
-        exportFilter = exportFilter with { Text = null };
-        if (await catalog.TryGetFreshStateAsync(prefix, activeFilter, false, ct) is not null)
-        {
-        	const int exportPage = 2000;
-        	var term = exportContent ? ContentTerm(q) : null;
-        	async Task<FilteredPage?> ReadExportPage(int number) => streamPopularity is null
-        		? await store.GetFilteredPageAsync(prefix, activeFilter, exportFilter, number, exportPage, term, ct)
-        		: await store.GetPopularPageAsync(prefix, activeFilter, exportFilter, number, exportPage, term, streamPopularity, ct);
+	/// Text/metadata export of the full filtered set, written to the response one capture at a time:
+	/// neither the server nor the browser holds the whole file (the browser just downloads a stream).
+	public async Task<IActionResult> Export(string url, string? filter, string? format = null,
+		string? year = null, string? category = null, string? status = null, string? section = null, string? q = null,
+		string? searchMode = null, string? type = null, string? unique = null, string? sort = null,
+		string? popularityMetric = null, int minPopularity = 0, bool includeEstimates = false, int maxPopularity = 0,
+		CancellationToken ct = default)
+	{
+		var prefix = UrlInput.NormalizePrefix(url ?? "");
+		if (prefix is null) return BadRequest();
+		var query = new CaptureSetQuery(prefix, UrlInput.NormalizeFilter(filter), year, category, status, section, q,
+			searchMode, type, unique, sort, popularityMetric, minPopularity, includeEstimates, maxPopularity);
+		var fmt = ExportWriter.NormalizeFormat(format);
 
-        	var first = await ReadExportPage(1);
-        	if (first is not null)
-        	{
-        		Response.ContentType = "application/json; charset=utf-8";
-        		await using var json = new System.Text.Json.Utf8JsonWriter(Response.Body);
-        		json.WriteStartArray();
-        		var pageNumber = 1;
-        		for (var current = first; ; current = (await ReadExportPage(pageNumber))!)
-        		{
-        			foreach (var c in current.Captures)
-        			{
-        				if (urlText is not null && !SearchTextMatcher.Matches(urlText, c.Capture.Original)) continue;
-        				json.WriteStartObject();
-        				json.WriteString("ts", c.Capture.Timestamp);
-        				json.WriteString("url", c.Capture.Original);
-        				json.WriteBoolean("ready", c.Ready);
-        				json.WriteEndObject();
-        			}
-        			await json.FlushAsync(ct);
-        			if (pageNumber * exportPage >= current.Total || current.Captures.Count == 0) break;
-        			pageNumber++;
-        		}
-        		json.WriteEndArray();
-        		await json.FlushAsync(ct);
-        		return new EmptyResult();
-        	}
-        }
+		Response.ContentType = ExportWriter.ContentType(fmt);
+		Response.Headers.ContentDisposition = "attachment; filename=\"wayback-export-all." + fmt + "\"";
+		await using var writer = new StreamWriter(Response.Body, new UTF8Encoding(false), 16 * 1024);
+		await writer.WriteAsync(ExportWriter.Header(fmt).AsMemory(), ct);
+		var first = true;
+		await foreach (var c in EnumerateCaptureSetAsync(query, ct))
+		{
+			var ts = c.Capture.Timestamp;
+			var original = c.Capture.Original;
+			var archive = "https://web.archive.org/web/" + ts + "/" + original;
+			ExportRecord record;
+			try
+			{
+				var page = await pages.GetAsync(ts, original, includeHtml: false, ct);
+				record = page is null
+					? new ExportRecord(original, archive, ts, null, null, "", "The capture could not be loaded from the Wayback Machine.")
+					: new ExportRecord(original, archive, ts, page.Parsed.Title, page.Parsed.Description, page.Parsed.Text, null);
+			}
+			catch (Exception ex) when (ex is not OperationCanceledException)
+			{
+				log.LogWarning(ex, "Export: text of {Timestamp} {Url} failed", ts, original);
+				record = new ExportRecord(original, archive, ts, null, null, "", "Text extraction failed");
+			}
+			await writer.WriteAsync(ExportWriter.Row(fmt, record, first).AsMemory(), ct);
+			await writer.FlushAsync(ct);
+			first = false;
+		}
+		await writer.WriteAsync(ExportWriter.Footer(fmt).AsMemory(), ct);
+		await writer.FlushAsync(ct);
+		return new EmptyResult();
+	}
 
-        var result = await catalog.GetAsync(prefix, activeFilter, false, ct);
-        IReadOnlyList<StoredCapture> captures = result.Snapshot.Captures;
-        var cf = new CaptureFilter(Clean(year), Clean(category), Clean(status), Clean(section), Clean(q),
-            UrlClassifier.NormalizeKind(type), IsTrue(unique));
-        if (IsContentSearch(mode, q))
-        {
-            captures = await ApplyFullTextFilterAsync(result.Snapshot.Captures, ContentTerm(q), ct);
-            var structural = cf with { Text = null };
-            if (structural.IsActive) captures = CaptureFacets.Apply(captures, structural);
-        }
-        else if (cf.IsActive)
-            captures = facetCache.GetOrApply(result.Snapshot, cf).Items;
+	private sealed record CaptureSetQuery(string Prefix, string ActiveFilter, string? Year, string? Category, string? Status,
+		string? Section, string? Q, string? SearchMode, string? Type, string? Unique, string? Sort, string? PopularityMetric,
+		int MinPopularity, bool IncludeEstimates, int MaxPopularity);
 
-        var exportSort = NormalizeSortMode(sort);
-        var exportMetric = NormalizePopularityMetric(popularityMetric);
-        if (exportSort != "newest" || exportMetric != "none")
-            captures = await ApplyPopularityAsync(captures, prefix, activeFilter, exportSort, exportMetric,
-                exportMetric == "none" ? 0 : Math.Max(0, minPopularity), ct, includeEstimates, exportMetric == "none" ? 0 : Math.Max(0, maxPopularity));
+	/// Streams the filtered capture set from SQL one page at a time (bounded memory); falls back to the catalog.
+	private async IAsyncEnumerable<StoredCapture> EnumerateCaptureSetAsync(CaptureSetQuery qy,
+		[System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+	{
+		var prefix = qy.Prefix;
+		var activeFilter = qy.ActiveFilter;
+		var mode = NormalizeSearchMode(qy.SearchMode);
+		var exportContent = IsContentSearch(mode, qy.Q);
+		var exportFilter = new CaptureFilter(Clean(qy.Year), Clean(qy.Category), Clean(qy.Status), Clean(qy.Section),
+			exportContent ? null : Clean(qy.Q), UrlClassifier.NormalizeKind(qy.Type), IsTrue(qy.Unique));
+		var streamSort = NormalizeSortMode(qy.Sort);
+		var streamMetric = NormalizePopularityMetric(qy.PopularityMetric);
+		var minPopularity = streamMetric == "none" ? 0 : Math.Max(0, qy.MinPopularity);
+		var maxPopularity = streamMetric == "none" ? 0 : Math.Max(0, qy.MaxPopularity);
+		var streamPopularity = streamSort != "newest" || streamMetric != "none"
+			? new PopularityQuery(streamSort, streamMetric, minPopularity, qy.IncludeEstimates, maxPopularity) : null;
 
-        return Json(captures.Select(c => new
-        {
-            ts = c.Capture.Timestamp,
-            url = c.Capture.Original,
-            ready = c.Ready   // archive / frame links are derived in the browser (about 60% smaller payload)
-        }));
-    }
+		var urlText = exportFilter.Text;   // matched per row in C# (SearchTextMatcher); SQL pages stay bounded
+		exportFilter = exportFilter with { Text = null };
+		if (await catalog.TryGetFreshStateAsync(prefix, activeFilter, false, ct) is not null)
+		{
+			const int exportPage = 2000;
+			var term = exportContent ? ContentTerm(qy.Q) : null;
+			async Task<FilteredPage?> ReadExportPage(int number) => streamPopularity is null
+				? await store.GetFilteredPageAsync(prefix, activeFilter, exportFilter, number, exportPage, term, ct)
+				: await store.GetPopularPageAsync(prefix, activeFilter, exportFilter, number, exportPage, term, streamPopularity, ct);
+
+			var current = await ReadExportPage(1);
+			if (current is not null)
+			{
+				for (var pageNumber = 1; ; )
+				{
+					foreach (var c in current.Captures)
+						if (urlText is null || SearchTextMatcher.Matches(urlText, c.Capture.Original)) yield return c;
+					if (pageNumber * exportPage >= current.Total || current.Captures.Count == 0) yield break;
+					pageNumber++;
+					current = await ReadExportPage(pageNumber);
+					if (current is null) yield break;
+				}
+			}
+		}
+
+		var result = await catalog.GetAsync(prefix, activeFilter, false, ct);
+		IReadOnlyList<StoredCapture> captures = result.Snapshot.Captures;
+		var cf = new CaptureFilter(Clean(qy.Year), Clean(qy.Category), Clean(qy.Status), Clean(qy.Section), Clean(qy.Q),
+			UrlClassifier.NormalizeKind(qy.Type), IsTrue(qy.Unique));
+		if (exportContent)
+		{
+			captures = await ApplyFullTextFilterAsync(result.Snapshot.Captures, ContentTerm(qy.Q), ct);
+			var structural = cf with { Text = null };
+			if (structural.IsActive) captures = CaptureFacets.Apply(captures, structural);
+		}
+		else if (cf.IsActive)
+			captures = facetCache.GetOrApply(result.Snapshot, cf).Items;
+
+		if (streamSort != "newest" || streamMetric != "none")
+			captures = await ApplyPopularityAsync(captures, prefix, activeFilter, streamSort, streamMetric,
+				minPopularity, ct, qy.IncludeEstimates, maxPopularity);
+
+		foreach (var c in captures) yield return c;
+	}
 
     /// Every known capture of one URL inside a loaded search (for the inspector panel).
     public async Task<IActionResult> History(string url, string? filter, string original, CancellationToken ct)
