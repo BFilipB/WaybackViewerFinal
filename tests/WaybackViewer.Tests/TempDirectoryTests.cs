@@ -48,7 +48,9 @@ public class TempDirectoryTests
             Assert.True(Directory.Exists(target));
             Assert.Equal(applied, Environment.GetEnvironmentVariable("TMP"));
             Assert.Equal(applied, Environment.GetEnvironmentVariable("TEMP"));
-            Assert.StartsWith(applied!, Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
+            // .NET reads TMP/TEMP only on Windows (Linux/macOS use TMPDIR).
+            if (OperatingSystem.IsWindows())
+                Assert.StartsWith(applied!, Path.GetTempPath().TrimEnd(Path.DirectorySeparatorChar), StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
