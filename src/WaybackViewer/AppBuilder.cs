@@ -32,9 +32,8 @@ public static class AppBuilder
     services.AddControllersWithViews(o => { o.Filters.Add(new Microsoft.AspNetCore.Mvc.AutoValidateAntiforgeryTokenAttribute()); o.Filters.Add<WaybackViewer.Services.RequestTimingFilter>(); })
             .AddApplicationPart(typeof(HomeController).Assembly);
         // JS fetch calls send the token from the page's <meta name="request-verification-token"> in this header.
-        if (builder.Configuration["Storage:KeysDirectory"] is { Length: > 0 } keysDir)
-            services.AddDataProtection().PersistKeysToFileSystem(Directory.CreateDirectory(
-                Path.IsPathRooted(keysDir) ? keysDir : ResolveDatabasePath(keysDir)));
+        if (UsableDirectory(builder.Configuration["Storage:KeysDirectory"]) is { } keysDir)
+            services.AddDataProtection().PersistKeysToFileSystem(Directory.CreateDirectory(keysDir));
         services.AddAntiforgery(o => o.HeaderName = "X-CSRF-TOKEN");
         services.AddResponseCompression(o =>
         {
@@ -195,13 +194,23 @@ app.UseResponseCompression();   // big list pages and the filtered-set JSON shri
     /// so temp files land on the data drive. Returns the applied folder, or null when not configured.
     public static string? RedirectTempDirectory(string? dir)
     {
-        if (string.IsNullOrWhiteSpace(dir)) return null;
-        var full = Path.GetFullPath(Path.IsPathRooted(dir) ? dir : ResolveDatabasePath(dir));
+        if (UsableDirectory(dir) is not { } full) return null;
         Directory.CreateDirectory(full);
         Environment.SetEnvironmentVariable("TMP", full);
         Environment.SetEnvironmentVariable("TEMP", full);
         Environment.SetEnvironmentVariable("SQLITE_TMPDIR", full);
         return full;
+    }
+
+    /// Full path of an optional machine-local folder setting (temp, keys), or null when it is unset or points at a
+    /// drive this machine does not have (e.g. the developer's E:\ on a CI runner or in Docker). Relative paths go
+    /// under the data root like the database.
+    internal static string? UsableDirectory(string? dir)
+    {
+        if (string.IsNullOrWhiteSpace(dir)) return null;
+        var windowsDrive = dir.Length >= 3 && char.IsAsciiLetter(dir[0]) && dir[1] == ':' && dir[2] is '\\' or '/';
+        if (windowsDrive && (!OperatingSystem.IsWindows() || !Directory.Exists(dir[..3]))) return null;
+        return Path.GetFullPath(Path.IsPathRooted(dir) ? dir : ResolveDatabasePath(dir));
     }
 
     /// The drive that holds all data. Override with the WAYBACKVIEWER_DATA_ROOT environment variable.

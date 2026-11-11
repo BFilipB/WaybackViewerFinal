@@ -15,6 +15,25 @@ public class TempDirectoryTests
         Assert.Equal(before, Environment.GetEnvironmentVariable("TMP"));
     }
 
+    [Theory]
+    [InlineData(@"Q:\no-such-drive\temp")] // the local E:\ setting seen from a machine without that drive
+    [InlineData("Q:/no-such-drive/keys")]
+    public void UsableDirectory_DriveMissing_IsSkippedSoStartupDoesNotFail(string dir)
+    {
+        if (OperatingSystem.IsWindows() && Directory.Exists("Q:\\")) return;
+        var before = Environment.GetEnvironmentVariable("TMP");
+        Assert.Null(AppBuilder.UsableDirectory(dir));
+        Assert.Null(AppBuilder.RedirectTempDirectory(dir));
+        Assert.Equal(before, Environment.GetEnvironmentVariable("TMP"));
+    }
+
+    [Fact]
+    public void UsableDirectory_ExistingRootedPath_IsKept()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "wv-usable");
+        Assert.Equal(Path.GetFullPath(dir), AppBuilder.UsableDirectory(dir));
+    }
+
     [Fact]
     public void RedirectTempDirectory_RootedPath_CreatesFolderAndPointsTempThere()
     {

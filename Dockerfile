@@ -14,6 +14,8 @@ COPY --from=build /app ./
 ENV ASPNETCORE_URLS=http://+:8080 \
 	ConnectionStrings__WaybackDb="Data Source=/data/wayback.db" \
 	Storage__HtmlRoot=/data/html-payloads \
+    Storage__KeysDirectory=/data/keys \
+    Storage__TempDirectory=/tmp \
 	Logging__File__Directory=/data/logs
 RUN mkdir -p /data && chown -R $APP_UID /data
 VOLUME /data

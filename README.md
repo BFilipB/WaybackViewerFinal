@@ -19,15 +19,15 @@
 
 | Home Screen | Operations Page |
 |---|---|
-| ![Home Screen](/assets/Wayback1.png) | ![Operations Page](/assets/wayback3.png) |
+| ![Home Screen](./assets/Wayback1.png) | ![Operations Page](./assets/wayback3.png) |
 
 | Searched URLs | URL Detail View |
 |---|---|
-| ![Searched URLs](/assets/wayback5.png) | ![URL Detail](/assets/wayback6.png) |
+| ![Searched URLs](./assets/wayback5.png) | ![URL Detail](./assets/wayback6.png) |
 
 | Home Page with Captured URL | Card View of Captures |
 |---|---|
-| ![Home with URL](/assets/wayback7.png) | ![Card View](/assets/wayback8.png) |
+| ![Home with URL](./assets/wayback7.png) | ![Card View](./assets/wayback8.png) |
 
 Wayback Viewer is a .NET 8 web app for loading website capture lists from the Internet Archive, browsing captures quickly,
 and persisting metadata + archived payloads for fast local replay.
