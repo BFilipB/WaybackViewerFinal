@@ -27,20 +27,9 @@
   <h1>Operations</h1>
   <p class="ops-help">Background work for every searched URL. Capture-list loads and page preloads run independently; active URLs share the download workers fairly.</p>
 
-  <nav class="ops-filters" aria-label="Filter operations">
-	@foreach (var (value, label) in states)
-	{
-	  <a href="@Qs(1, value, Model.TypeFilter)" class="@(value == Model.StateFilter ? "on" : "")">@label</a>
-	}
-	<span class="sep">|</span>
-	@foreach (var (value, label) in types)
-	{
-	  <a href="@Qs(1, Model.StateFilter, value)" class="@(value == Model.TypeFilter ? "on" : "")">@label</a>
-	}
-  </nav>
-
-  <form method="get" action="/operations" class="ops-filters" role="search">
-    <input type="search" name="q" value="@Model.Search" maxlength="200" placeholder="Search URL or filter" aria-label="Search operations" />
+  <div class="ops-controls">
+  <form method="get" action="/operations" autocomplete="off" class="ops-filters" role="search">
+    <input type="search" name="q" value="@Model.Search" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="200" placeholder="Search URL or filter" aria-label="Search operations" />
     <select name="sort" aria-label="Sort by">
       <option value="updated" selected="@(Model.Sort == "updated")">Last updated</option>
       <option value="url" selected="@(Model.Sort == "url")">URL</option>
@@ -56,23 +45,31 @@
     <button type="submit">Apply</button>
     @if (!string.IsNullOrEmpty(Model.Search)) { <a href="@(Qs(1, Model.StateFilter, Model.TypeFilter).Replace("q=" + Uri.EscapeDataString(Model.Search) + "&", ""))">Clear</a> }
   </form>
-
-  <div class="ops-bulk">
-	<span class="ops-scope@(Model.Narrowed ? " narrowed" : "")" role="group" aria-label="Actions for every searched URL"
-      title="Pause all, Resume all and Retry all failed act on every searched URL. Search and filters only change which rows are shown.">
-      <span class="ops-scope-tag"><span class="ops-scope-dot" aria-hidden="true"></span>All @Model.AllTotal URLs</span>
-      <button type="button" data-bulk="pause" data-all="true">Pause all</button>
-	<button type="button" data-bulk="resume" data-all="true">Resume all</button>
-	<button type="button" data-bulk="retry-failed" data-all="true">Retry all failed</button>
-      @if (Model.Narrowed) { <span class="ops-scope-note">&#9888; ignores your search/filters &mdash; affects @Model.AllTotal, not just the @Model.Total shown</span> }
-    </span>
+  <nav class="ops-filters" aria-label="Filter operations">
+	@foreach (var (value, label) in states)
+	{
+	  <a href="@Qs(1, value, Model.TypeFilter)" class="@(value == Model.StateFilter ? "on" : "")">@label</a>
+	}
 	<span class="sep">|</span>
-	<span id="opsSelected">0 selected</span>
-	<button type="button" data-bulk="pause">Pause selected</button>
-	<button type="button" data-bulk="resume">Resume selected</button>
-	<button type="button" data-bulk="retry-failed">Retry failed (selected)</button>
-	<button type="button" data-bulk="refresh">Refresh selected</button>
+	@foreach (var (value, label) in types)
+	{
+	  <a href="@Qs(1, Model.StateFilter, value)" class="@(value == Model.TypeFilter ? "on" : "")">@label</a>
+	}
+  </nav>
+  </div>
+
+  <div class="ops-bulk" id="opsBulk" data-state="@Model.StateFilter" data-type="@Model.TypeFilter" data-q="@Model.Search" data-total="@Model.Total">
+	<span id="opsSelected" class="ops-selected" aria-live="polite">0 selected</span>
+	<button type="button" data-bulk="pause" disabled>Pause</button>
+	<button type="button" data-bulk="resume" disabled>Resume</button>
+	<button type="button" data-bulk="retry-failed" disabled>Retry failed</button>
+	<button type="button" data-bulk="refresh" disabled>Refresh</button>
 	<span id="opsMessage" aria-live="polite"></span>
+  </div>
+  <div class="ops-banner" id="opsBanner" hidden>
+	<span id="opsBannerText"></span>
+	<button type="button" id="opsSelectMatching"></button>
+	<button type="button" id="opsClearSelection" hidden>Clear selection</button>
   </div>
 
   @if (Model.Rows.Count == 0)
@@ -143,16 +140,13 @@
   .ops-completed { color: var(--ok); }
   .ops-failed, .ops-completedwithfailures { color: #ff9d9d; }
   .ops-paused { color: var(--muted); }
-  .ops-scope { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 3px 10px 3px 4px; border-radius: 999px;
-    border: 1px dashed var(--accent); background: linear-gradient(90deg, rgba(120,170,255,.12), transparent); }
-  .ops-scope.narrowed { border-style: solid; border-color: #f5b041; background: linear-gradient(90deg, rgba(245,176,65,.16), transparent); }
-  .ops-scope-tag { display: inline-flex; align-items: center; gap: 6px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: bold;
-    text-transform: uppercase; letter-spacing: .04em; background: var(--accent); color: #fff; }
-  .ops-scope.narrowed .ops-scope-tag { background: #f5b041; color: #222; }
-  .ops-scope-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; animation: ops-pulse 1.6s ease-in-out infinite; }
-  .ops-scope-note { font-size: 11px; color: #f5b041; }
-  @@keyframes ops-pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.6); } }
-  @@media (prefers-reduced-motion: reduce) { .ops-scope-dot { animation: none; } }
+  .ops-controls { border: 1px solid var(--line); border-radius: 8px; padding: 4px 10px; margin: 8px 0; }
+  .ops-controls .ops-filters { margin: 4px 0; }
+  .ops-selected { font-weight: bold; min-width: 90px; }
+  .ops-bulk button:disabled { opacity: .45; cursor: not-allowed; }
+  .ops-banner { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 10px; margin: 6px 0; border: 1px solid var(--line); border-radius: 6px; font-size: 12px; }
+  .ops-banner[hidden] { display: none; }
+  .ops-banner button { background: none; border: 0; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
 </style>
 
 <script>
@@ -179,29 +173,98 @@
 	message.textContent = 'Working...';
 	try {
 	  const result = await post(action, body);
-	  message.textContent = 'Applied to ' + result.applied + ' URL(s).';
+	  message.textContent = 'Applied to ' + result.applied + ' URL(s).' + (result.capped ? ' Limit reached - run it again for the rest.' : '');
 	  refresh();
 	} catch (e) { message.textContent = 'Action failed (' + e.message + ').'; }
   }
 
-  document.querySelectorAll('[data-bulk]').forEach(btn => btn.addEventListener('click', () => {
-	if (btn.dataset.all === 'true') return run(btn.dataset.bulk, { all: true });
-	const keys = selected();
+  const bulk = document.getElementById('opsBulk');
+  const banner = document.getElementById('opsBanner');
+  const bannerText = document.getElementById('opsBannerText');
+  const selectMatching = document.getElementById('opsSelectMatching');
+  const clearSelection = document.getElementById('opsClearSelection');
+  const master = document.getElementById('opsAll');
+  const total = Number(bulk.dataset.total || 0);
+  const scope = () => ({ state: bulk.dataset.state || null, type: bulk.dataset.type || null, search: bulk.dataset.q || null });
+
+  // The selection survives paging: it is kept in sessionStorage per search/filter scope.
+  // matching: every URL matching the scope (all pages) is selected. picked: explicit rows, any page.
+  const storeKey = 'opsSel:' + JSON.stringify(scope());
+  const MAX_PICKED = 1000;
+  let sel = { matching: false, picked: {} };
+  try { const s = JSON.parse(sessionStorage.getItem(storeKey) || 'null'); if (s && typeof s.picked === 'object') sel = { matching: !!s.matching, picked: s.picked }; } catch (err) { console.warn('saved selection ignored', err); }
+  const save = () => { try { sessionStorage.setItem(storeKey, JSON.stringify(sel)); } catch (e) { console.warn('selection not persisted', e); } };
+  const id = k => k.prefix + '\n' + k.filter;
+  const pickedCount = () => Object.keys(sel.picked).length;
+
+  function syncChecks() {
+	rows().forEach(tr => { tr.querySelector('.ops-pick').checked = sel.matching || id(key(tr)) in sel.picked; });
+  }
+
+  function updateSelection() {
+	const onPage = rows().length;
+	const onPageChecked = selected().length;
+	const count = sel.matching ? total : pickedCount();
+	if (master) { master.checked = onPage > 0 && onPageChecked === onPage; master.indeterminate = onPageChecked > 0 && onPageChecked < onPage; }
+	selectedInfo.textContent = count + ' selected' + (!sel.matching && count > onPageChecked ? ' (across pages)' : '');
+	document.querySelectorAll('[data-bulk]').forEach(b => { b.disabled = count === 0; });
+	const offer = !sel.matching && onPage > 0 && onPageChecked === onPage && total > pickedCount();
+	banner.hidden = !(sel.matching || offer || count > 0);
+	selectMatching.hidden = !offer;
+	clearSelection.hidden = count === 0;
+	bannerText.textContent = sel.matching ? 'All ' + total + ' matching URLs (every page) are selected.'
+	  : offer ? pickedCount() + ' selected. Select all ' + total + ' matching URLs on every page?'
+	  : count > 0 ? count + ' selected (kept while you change pages).' : '';
+	if (offer) selectMatching.textContent = 'Select all ' + total + ' matching URLs';
+	save();
+  }
+
+  function setRow(tr, on) {
+	const k = key(tr);
+	if (on) { if (pickedCount() < MAX_PICKED) sel.picked[id(k)] = k; else message.textContent = 'At most ' + MAX_PICKED + ' rows can be ticked individually; use "Select all matching" instead.'; }
+	else delete sel.picked[id(k)];
+  }
+
+  async function runSelected(action) {
+	if (sel.matching) return run(action, { matching: scope() });
+	const keys = Object.values(sel.picked);
 	if (keys.length === 0) { message.textContent = 'Select at least one row.'; return; }
-	run(btn.dataset.bulk, { keys });
-  }));
+	message.textContent = 'Working...';
+	try {
+	  let applied = 0;
+	  for (let i = 0; i < keys.length; i += 200) applied += (await post(action, { keys: keys.slice(i, i + 200) })).applied;
+	  message.textContent = 'Applied to ' + applied + ' URL(s).';
+	  refresh();
+	} catch (e) { message.textContent = 'Action failed (' + e.message + ').'; }
+  }
+
+  document.querySelectorAll('[data-bulk]').forEach(btn => btn.addEventListener('click', () => runSelected(btn.dataset.bulk)));
+  selectMatching.addEventListener('click', () => { sel.matching = true; sel.picked = {}; syncChecks(); updateSelection(); });
+  clearSelection.addEventListener('click', () => { sel = { matching: false, picked: {} }; syncChecks(); updateSelection(); });
   if (table) {
 	table.addEventListener('click', e => {
 	  const btn = e.target.closest('[data-row]');
 	  if (btn) run(btn.dataset.row, { keys: [key(btn.closest('tr'))] });
 	});
-	table.addEventListener('change', () => { selectedInfo.textContent = selected().length + ' selected'; });
-	document.getElementById('opsAll')?.addEventListener('change', e => {
-	  rows().forEach(tr => tr.querySelector('.ops-pick').checked = e.target.checked);
-	  selectedInfo.textContent = selected().length + ' selected';
+	table.addEventListener('change', e => {
+	  if (e.target.id === 'opsAll') return;
+	  const tr = e.target.closest('tr'); if (!tr) return;
+	  if (sel.matching) {
+		// Un-ticking one row leaves "all matching": keep the other rows of this page as explicit picks.
+		sel.matching = false; sel.picked = {};
+		rows().forEach(r => { if (r === tr ? e.target.checked : true) setRow(r, true); });
+	  }
+	  setRow(tr, e.target.checked);
+	  syncChecks(); updateSelection();
+	});
+	master?.addEventListener('change', e => {
+	  if (sel.matching && !e.target.checked) sel = { matching: false, picked: {} };
+	  else rows().forEach(tr => setRow(tr, e.target.checked));
+	  syncChecks(); updateSelection();
 	});
   }
-
+  syncChecks();
+  updateSelection();
   // Delete: ask the server what would be removed, confirm, then the delete runs as a background operation.
   async function confirmDelete(tr, level) {
     const k = key(tr);

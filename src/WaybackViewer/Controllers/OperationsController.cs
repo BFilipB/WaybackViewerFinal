@@ -14,6 +14,8 @@ public class OperationsController(IArchiveStore store, PreloadCoordinator preloa
     public const int DefaultPageSize = 25;
     public const int MaxBulk = 200;
 	public const int MaxSearchLength = 200;
+    /// Upper bound of URLs one "select all matching" action touches (keys are collected first, so memory stays bounded).
+    public const int MaxMatching = 5000;
 
     private static readonly Dictionary<string, OperationState[]> StateFilters = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -103,19 +105,29 @@ public class OperationsController(IArchiveStore store, PreloadCoordinator preloa
     {
         if (selection is null) return BadRequest();
         IReadOnlyList<SearchKey>? keys;
-        if (selection.All)
-        {
-            // "Pause all" etc.: walk the searched URLs page by page so memory stays bounded.
-            var count = 0;
-            for (var offset = 0; ; offset += MaxBulk)
-            {
-                var page = await store.ListOperationSearchesAsync(new OperationListQuery(null, null, offset, MaxBulk), ct);
-                foreach (var key in page.Searches) { await action(key, ct); count++; }
-                if (page.Searches.Count < MaxBulk) break;
-            }
-            log.LogInformation("Bulk operation action applied to {Count} searched URLs", count);
-            return Json(new { applied = count });
-        }
+        if (selection.All || selection.Matching is not null)
+		{
+			// "Select all matching" (or legacy "all"): collect the keys first. Acting while paging by offset would skip rows,
+			// because the action itself changes the sort order (UpdatedAt) and the state filters.
+			var scope = selection.Matching;
+			// An unknown filter must not silently widen the scope to every URL.
+			OperationState[]? states = null; OperationKind[]? kinds = null;
+			if (!string.IsNullOrEmpty(scope?.State) && !StateFilters.TryGetValue(scope.State, out states)) return BadRequest();
+			if (!string.IsNullOrEmpty(scope?.Type) && !TypeFilters.TryGetValue(scope.Type, out kinds)) return BadRequest();
+			var search = NormalizeSearch(scope?.Search);
+			var all = new List<SearchKey>();
+			var capped = false;
+			for (var offset = 0; ; offset += MaxBulk)
+			{
+				var page = await store.ListOperationSearchesAsync(new OperationListQuery(kinds, states, offset, MaxBulk, search), ct);
+				all.AddRange(page.Searches);
+				if (all.Count >= MaxMatching) { capped = page.Total > MaxMatching; all.RemoveRange(MaxMatching, all.Count - MaxMatching); break; }
+				if (page.Searches.Count < MaxBulk) break;
+			}
+			foreach (var key in all) await action(key, ct);
+			log.LogInformation("Bulk operation action applied to {Count} searched URLs (capped={Capped})", all.Count, capped);
+			return Json(new { applied = all.Count, capped });
+		}
 
         keys = ParseKeys(selection);
         if (keys is null) return BadRequest();
@@ -123,7 +135,14 @@ public class OperationsController(IArchiveStore store, PreloadCoordinator preloa
         return Json(new { applied = keys.Count });
     }
 
-    private static IReadOnlyList<SearchKey>? ParseKeys(OperationSelection? selection)
+    private static string? NormalizeSearch(string? text)
+    {
+        var search = text?.Trim();
+        if (string.IsNullOrEmpty(search)) return null;
+        return search.Length > MaxSearchLength ? search[..MaxSearchLength] : search;
+    }
+
+private static IReadOnlyList<SearchKey>? ParseKeys(OperationSelection? selection)
     {
         if (selection?.Keys is null || selection.Keys.Count > MaxBulk) return null;
         var result = new List<SearchKey>(selection.Keys.Count);
@@ -139,9 +158,7 @@ public class OperationsController(IArchiveStore store, PreloadCoordinator preloa
     internal async Task<OperationsPageModel> LoadAsync(string? state, string? type, int page, int pageSize, CancellationToken ct,
         string? search = null, string? sort = null, string? dir = null)
     {
-        search = search?.Trim();
-        if (string.IsNullOrEmpty(search)) search = null;
-        else if (search.Length > MaxSearchLength) search = search[..MaxSearchLength];
+        search = NormalizeSearch(search);
         var order = Enum.TryParse<OperationSort>(sort, true, out var parsedSort) && Enum.IsDefined(parsedSort) ? parsedSort : OperationSort.Updated;
         var descending = !string.Equals(dir, "asc", StringComparison.OrdinalIgnoreCase);
         pageSize = Math.Clamp(pageSize, 10, 100);
@@ -151,12 +168,9 @@ public class OperationsController(IArchiveStore store, PreloadCoordinator preloa
 
         var result = await store.ListOperationSearchesAsync(new OperationListQuery(kinds, states, (page - 1) * pageSize, pageSize, search, order, descending), ct);
         var ops = await store.GetOperationsForSearchesAsync(result.Searches, ct);
-        // Bulk "all" actions ignore search/filters, so the page shows how many URLs they really affect.
-        var allTotal = search is null && states is null && kinds is null ? result.Total
-            : (await store.ListOperationSearchesAsync(new OperationListQuery(null, null, 0, 0), ct)).Total;
         return new OperationsPageModel(BuildRows(result.Searches, ops), result.Total, page, pageSize,
             states is null ? null : state!.ToLowerInvariant(), kinds is null ? null : type!.ToLowerInvariant(),
-			search, order.ToString().ToLowerInvariant(), descending, allTotal);
+			search, order.ToString().ToLowerInvariant(), descending);
     }
 
     private IReadOnlyList<OperationRow> BuildRows(IReadOnlyList<SearchKey> keys, IReadOnlyList<BackgroundOperation> ops)

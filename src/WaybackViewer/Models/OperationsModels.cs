@@ -36,15 +36,15 @@ public sealed record OperationsPageModel(
     string? TypeFilter,
 	string? Search = null,
 	string Sort = "updated",
-	bool Descending = true,
-    int AllTotal = 0)
+	bool Descending = true)
 {
     public int PageCount => Math.Max(1, (Total + PageSize - 1) / PageSize);
-    /// True when a search or filter hides some URLs (bulk "all" actions still act on every URL).
-    public bool Narrowed => Search is not null || StateFilter is not null || TypeFilter is not null;
 }
 
 /// Selected rows for a bulk action. All = every searched URL (ignores Keys).
-public sealed record OperationSelection(IReadOnlyList<OperationKeyInput>? Keys, bool All = false);
+public sealed record OperationSelection(IReadOnlyList<OperationKeyInput>? Keys, bool All = false, OperationScope? Matching = null);
+
+/// Every URL matching the Operations page search/filters, across all pages (the server re-applies the same filters).
+public sealed record OperationScope(string? State, string? Type, string? Search);
 
 public sealed record OperationKeyInput(string? Prefix, string? Filter);
