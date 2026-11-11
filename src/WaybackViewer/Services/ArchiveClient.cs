@@ -173,21 +173,29 @@ public sealed class ArchiveClient : IArchiveClient
         }
     }
 
+    static ArchiveClient() => System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);   // windows-1251, iso-8859-x, shift_jis...
+
     /// Decodes the body with the declared charset; an unknown/invalid charset (common in old archived pages) falls
-    /// back to UTF-8 instead of failing the whole download.
+    /// back to UTF-8 instead of failing the whole download. The body is decoded while it streams in, so only the
+    /// resulting string is held (no full byte[] copy next to it).
     internal static async Task<string> ReadBodyAsync(HttpContent content, CancellationToken ct)
     {
-        var bytes = await content.ReadAsByteArrayAsync(ct).ConfigureAwait(false);
-        var charset = content.Headers.ContentType?.CharSet?.Trim('"', '\'', ' ');
-        var encoding = System.Text.Encoding.UTF8;
-        if (!string.IsNullOrEmpty(charset))
-        {
-            try { encoding = System.Text.Encoding.GetEncoding(charset); }
-            catch (ArgumentException) { }   // unsupported charset name: keep UTF-8
-        }
-        return encoding.GetString(bytes);
+        var encoding = ResolveEncoding(content.Headers.ContentType?.CharSet);
+        await using var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var reader = new StreamReader(stream, encoding, detectEncodingFromByteOrderMarks: true, bufferSize: 16 * 1024);
+        return await reader.ReadToEndAsync(ct).ConfigureAwait(false);
     }
 
+    /// Charset name to encoding without throwing for unknown names (avoids first-chance exceptions per page).
+    internal static System.Text.Encoding ResolveEncoding(string? charset)
+    {
+        charset = charset?.Trim('"', '\'', ' ');
+        if (string.IsNullOrEmpty(charset)) return System.Text.Encoding.UTF8;
+        var info = System.Text.Encoding.GetEncodings().FirstOrDefault(e => string.Equals(e.Name, charset, StringComparison.OrdinalIgnoreCase));
+        if (info is not null) return info.GetEncoding();
+        try { return System.Text.Encoding.GetEncoding(charset); }   // aliases (e.g. "latin1", "cp1251") resolved by name
+        catch (ArgumentException) { return System.Text.Encoding.UTF8; }   // unsupported charset name: keep UTF-8
+    }
     private static bool IsNetworkFailure(Exception ex, CancellationToken ct) =>
         ex is HttpRequestException || (ex is TaskCanceledException && !ct.IsCancellationRequested);   // HttpClient timeout
 

@@ -582,7 +582,7 @@ Notes:
 - Search matching is tolerant (not overly literal):
   - case-insensitive
   - punctuation/extra-space tolerant token matching
-	- diacritic-insensitive (for example `café` matches `cafe`)
+    - diacritic-insensitive (for example `café` matches `cafe`)
   - basic Cyrillic/Latin equivalence (for example `zdravo` matches `здраво`)
 
 ---
@@ -734,6 +734,7 @@ Use environment variables with `__` separators for deployment overrides, or loca
 - **Free-text URL search in SQL:** SQLite registers the app's own matcher (Cyrillic/Latin transliteration, accent folding) as a `url_match` SQL function, so results equal the in-memory matcher. Databases without it (PostgreSQL) fall back to the in-memory path for that filter only.
 - **Popularity in SQL:** per-capture archive signals are persisted (`CaptureSignals`) and rebuilt when a list is refreshed; ranking, raw-value thresholds, presets and histogram are SQL; within-tier percentile/confidence weighting affects sorting.
 - **Bounded server work where supported:** history is limited, unsaved-page downloads are read in batches, capture-set responses stream in pages, and several caches have explicit limits. Filtered exports stream from `/Home/Export`; only the current-page export is built in the browser.
+- **Page downloads:** archived pages are decoded as they stream in (16 KB buffer), so a download holds only the final text, not an extra copy of the raw bytes. Legacy code pages (`windows-1251`, `iso-8859-x`, `shift_jis`...) are registered at startup and decoded correctly; unknown charset names fall back to UTF-8 without throwing, so the debugger no longer shows a first-chance exception per page.
 - Performance tests exercise large lists, including 100,000-capture fixtures. Timings depend on hardware, warm caches, database size and concurrent work; they are not an end-user latency guarantee.
 - SQLite runs in WAL mode with tuned pragmas; responses are compressed and support ETag/304.
 

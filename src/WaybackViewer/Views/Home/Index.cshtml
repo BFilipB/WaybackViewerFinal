@@ -1366,32 +1366,32 @@ else if (Model.CachedAt is not null)
         }
         setTimeout(tick, 1500);
       })();
-	  // Suggest URLs that already have captures in the database (up to 200, most captures first; matches anywhere).
-	  (function knownUrlSuggestions() {
-		const input = document.querySelector('input[name="url"]');
-		const list = document.getElementById('knownUrls');
-		if (!input || !list) return;
-		let timer = 0, controller = null, last = null;
-		function load(term) {
-		  if (term === last) return;
-		  last = term;
-		  if (controller) controller.abort();
-		  controller = new AbortController();
-		  fetch('/urls/suggest?q=' + encodeURIComponent(term), { signal: controller.signal })
-			.then(r => r.ok ? r.json() : [])
-			.then(items => {
-			  list.textContent = '';
-			  (items || []).forEach(s => { const o = document.createElement('option'); o.value = s.prefix; list.appendChild(o); });
-			})
-			.catch(e => { if (e.name !== 'AbortError') { last = null; console.warn('Autocomplete failed', e); } });
-		}
-		input.addEventListener('focus', () => load(input.value.trim()));
-		input.addEventListener('input', () => {
-		  clearTimeout(timer);
-		  const term = input.value.trim();
-		  timer = setTimeout(() => load(term), 200);
-		});
-	  })();
+      // Suggest URLs that already have captures in the database (up to 200, most captures first; matches anywhere).
+      (function knownUrlSuggestions() {
+        const input = document.querySelector('input[name="url"]');
+        const list = document.getElementById('knownUrls');
+        if (!input || !list) return;
+        let timer = 0, controller = null, last = null;
+        function load(term) {
+          if (term === last) return;
+          last = term;
+          if (controller) controller.abort();
+          controller = new AbortController();
+          fetch('/urls/suggest?q=' + encodeURIComponent(term), { signal: controller.signal })
+            .then(r => r.ok ? r.json() : [])
+            .then(items => {
+              list.textContent = '';
+              (items || []).forEach(s => { const o = document.createElement('option'); o.value = s.prefix; list.appendChild(o); });
+            })
+            .catch(e => { if (e.name !== 'AbortError') { last = null; console.warn('Autocomplete failed', e); } });
+        }
+        input.addEventListener('focus', () => load(input.value.trim()));
+        input.addEventListener('input', () => {
+          clearTimeout(timer);
+          const term = input.value.trim();
+          timer = setTimeout(() => load(term), 200);
+        });
+      })();
       // 5) Copy a link to this view; save and recall named views.
       (function viewTools() {
         const copy = document.getElementById('copyViewLink'), save = document.getElementById('saveView'), box = document.getElementById('savedViews');
