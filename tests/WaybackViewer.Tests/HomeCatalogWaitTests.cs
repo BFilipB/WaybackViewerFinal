@@ -8,6 +8,7 @@ public class HomeCatalogWaitTests
     public async Task Slow_cdx_download_defers_to_a_background_load_instead_of_holding_the_page()
     {
         await using var host = await AppHost.StartAsync(new Dictionary<string, string?> { ["Performance:CatalogWaitMs"] = "100" });
+        await host.GetAsync("/");   // warm up JIT + Razor compilation so only the deferral is timed (CI runners are slow cold)
         host.RouteSite("example.com/", SampleData.Captures(3));
         host.Archive.BeforeResponse = _ => Task.Delay(6000);   // far above a cold first request (JIT + Razor), so timing noise cannot fail the test
 
