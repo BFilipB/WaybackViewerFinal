@@ -48,4 +48,38 @@ public class FrontendMemoryTests
         Assert.DoesNotContain("await exportText(all)", home);
         Assert.Contains("params.set('max', String(SHOW_MAX))", home);
     }
+
+    [Fact]
+    public void Layout_has_no_prefetch_or_view_transitions_and_defaults_to_subtle_motion()
+    {
+        var layout = View("Shared", "_Layout.cshtml");
+        Assert.DoesNotContain("speculationrules\">", layout);
+        Assert.DoesNotContain("@view-transition", layout);
+        Assert.DoesNotContain("|| 'rich'", layout);
+        Assert.Contains("|| 'subtle'", layout);
+        Assert.Contains("}, 30000);", layout);   // header clock: not once a second
+    }
+
+    [Fact]
+    public void Slideshow_defaults_to_text_loads_one_archived_page_and_releases_frames_when_hidden_or_slow()
+    {
+        var home = View("Home", "Index.cshtml");
+        Assert.Contains("const AHEAD = 0,", home);
+        Assert.Contains("localStorage.getItem('wb-mode') === 'full' ? 'full' : 'fast'", home);
+        Assert.Contains("if (document.hidden) dropFrames(); else showSlide();", home);
+        Assert.Contains("mode = 'fast';", home);
+        var timeout = home.IndexOf("mode = 'fast';", StringComparison.Ordinal);
+        Assert.Contains("dropFrames();", home.Substring(timeout - 200, 200));
+    }
+
+    [Fact]
+    public void Archived_page_scripts_are_off_unless_the_user_opts_in()
+    {
+        var home = View("Home", "Index.cshtml");
+        Assert.Contains("scripts ? 'allow-scripts allow-popups' : 'allow-popups'", home);
+        Assert.Contains("wb-scripts", home);
+        Assert.Contains("'&scripts=true'", home);      // binds to the Frame action's bool parameter
+        Assert.Contains("id=\"ssScripts\"", home);
+        Assert.DoesNotContain("`r`n", home);              // no escaped newlines leaked into markup
+    }
 }

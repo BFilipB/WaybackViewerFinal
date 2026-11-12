@@ -348,6 +348,7 @@ else if (Model.CachedAt is not null)
     <button id="ssJumpBtn">Go</button>
     <span class="sshint">&larr; &rarr; navigate &nbsp; F fast/full &nbsp; O open tab &nbsp; T text (full view) &nbsp; Esc close</span>
     <button id="ssMode">Full page (F)</button>
+    <label class="jump" title="Let archived pages run their own scripts (uses more memory; some pages need it to look right)"><input id="ssScripts" type="checkbox" /> Run page scripts</label>
     <button id="ssClose">Close</button>
   </div>
   <div id="ssMain" class="ssmain">
@@ -416,11 +417,11 @@ else if (Model.CachedAt is not null)
   const ss = byId('ss'), ssMain = byId('ssMain'), ssLoading = byId('ssLoading');
   const ssLoadingText = byId('ssLoadingText'), ssError = byId('ssError'), ssReader = byId('ssReader');
   const ssModeBtn = byId('ssMode');
-  const AHEAD = 1, BEHIND = 0, SPINNER_DELAY_MS = 150, TIMEOUT_MS = 20000, TEXT_LOOKAHEAD = 4, TEXT_CACHE_MAX = 24;
+  const AHEAD = 0, BEHIND = 0, SPINNER_DELAY_MS = 150, TIMEOUT_MS = 20000, TEXT_LOOKAHEAD = 4, TEXT_CACHE_MAX = 24;
   const frames = new Map();                         // full view: slide index -> { el, loaded }
   const seen = new Set();                           // full view: keyOf(card) values that finished loading once
   const textPromises = new Map(), textValues = new Map();   // fast view: text cache
-  let mode = localStorage.getItem('wb-mode') === 'fast' ? 'fast' : 'full';
+  let mode = localStorage.getItem('wb-mode') === 'full' ? 'full' : 'fast';
   let list = [], idx = 0, spinnerTimer, loadTimer, boostTimer;
   let lastNavAt = 0;
 
@@ -451,6 +452,10 @@ else if (Model.CachedAt is not null)
     if (!ss.hidden) showSlide();
   }
   // Blank a frame before removing it so the browser releases the archived page (scripts, images) right away.
+  // Archived pages run their own scripts (ads, trackers, timers) only when this is switched on.
+  const runScripts = () => localStorage.getItem('wb-scripts') === '1';
+  const ssScripts = byId('ssScripts');
+  if (ssScripts) { ssScripts.checked = runScripts(); ssScripts.onchange = () => { localStorage.setItem('wb-scripts', ssScripts.checked ? '1' : '0'); dropFrames(); if (!ss.hidden && mode === 'full') showSlide(); }; }
   function freeFrame(f) { f.el.src = 'about:blank'; f.el.remove(); }
   function dropFrames() { frames.forEach(freeFrame); frames.clear(); }
 
@@ -511,7 +516,8 @@ else if (Model.CachedAt is not null)
     const card = list[i];
     const el = document.createElement('iframe');
     el.className = 'ssframe';
-    el.setAttribute('sandbox', 'allow-scripts allow-popups');
+    const scripts = runScripts();
+    el.setAttribute('sandbox', scripts ? 'allow-scripts allow-popups' : 'allow-popups');
     el.setAttribute('loading', 'eager');
     el.setAttribute('referrerpolicy', 'no-referrer');
     el.hidden = true;
@@ -522,7 +528,7 @@ else if (Model.CachedAt is not null)
       card.dataset.ready = '1';
       if (i === idx && !ss.hidden && mode === 'full') onCurrentLoaded();
     });
-    el.src = card.dataset.frame;
+    el.src = card.dataset.frame + (scripts ? '&scripts=true' : '');
     ssMain.insertBefore(el, ssLoading);
     frames.set(i, f);
     return f;
@@ -556,6 +562,7 @@ else if (Model.CachedAt is not null)
       loadTimer = setTimeout(() => {
         if (current.loaded) return;
         // iframe view failed/too slow: automatically fall back to text so the user still sees content immediately.
+        dropFrames();   // free the slow archived page; text view takes over
         mode = 'fast';
         updateModeButton();
         ssLoading.hidden = true;
@@ -621,6 +628,8 @@ else if (Model.CachedAt is not null)
     showSlide();
     ss.focus({ preventScroll: true });
   }
+  // A hidden tab keeps no archived page alive; coming back reloads only the current slide.
+  document.addEventListener('visibilitychange', () => { if (ss.hidden || mode !== 'full') return; if (document.hidden) dropFrames(); else showSlide(); });
   function closeShow() {
     clearTimeout(spinnerTimer); clearTimeout(loadTimer);
     dropFrames();

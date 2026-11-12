@@ -893,12 +893,12 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
     }
 
     /// The archived HTML, served from the database with a base tag so relative assets load from Wayback.
-    public async Task<IActionResult> Frame(string ts, string url, CancellationToken ct)
+    public async Task<IActionResult> Frame(string ts, string url, bool scripts = false, CancellationToken ct = default)
     {
         if (!UrlInput.IsValidTimestamp(ts) || !UrlInput.IsValidCaptureUrl(url)) return BadRequest();
 
         // A stored capture never changes: answer a revalidation with 304 without loading or decompressing the HTML.
-        var etag = $"\"{ts}-{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(url)))[..16]}\"";
+        var etag = $"\"{ts}{(scripts ? "s" : "")}-{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(url)))[..16]}\"";
         if (Request.Headers.IfNoneMatch.ToString() == etag && await pages.IsStoredAsync(ts, url, ct))
         {
             Response.Headers.ETag = etag;
@@ -911,7 +911,7 @@ public class HomeController(CaptureCatalog catalog, PageService pages, PreloadCo
 
         var html = FrameHtml.InjectBase(HtmlCodec.Decompress(page.HtmlGz), ArchiveUrls.Frame(ts, url));
         Response.Headers.CacheControl = "private,max-age=86400"; // a capture at a fixed timestamp never changes
-        Response.Headers.ContentSecurityPolicy = "sandbox allow-scripts allow-popups";
+        Response.Headers.ContentSecurityPolicy = scripts ? "sandbox allow-scripts allow-popups" : "sandbox allow-popups";
         return Content(html, "text/html", Encoding.UTF8);
     }
 }

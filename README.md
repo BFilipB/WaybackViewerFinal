@@ -525,6 +525,8 @@ Use **Jump to** with a slide number or capture timestamp, then **Go** to move di
 
 Fast text is quickest for already-saved pages. Unsaved pages may still need an on-demand fetch. Full-page replay can request images/styles/scripts from the external archive, even when HTML is local. Missing assets, blocked scripts, authentication screens and broken archived layouts are possible. If full replay takes too long (about 20 seconds), the app falls back to text.
 
+**Low browser memory by default.** The slideshow opens in fast text view; full-page view keeps one archived page at a time, runs no archived scripts unless you tick **Run page scripts**, and releases the page when the tab is hidden or the page is slow. Link prefetching and page-transition animations are off, motion defaults to *Subtle*, and the header clock updates every 30 seconds. The default table page size is 50.
+
 The slideshow frame is sandboxed, but archived pages remain third-party content. Do not treat an archived sign-in form as a trusted login screen or assume a local HTML cache is a complete offline website.
 
 ### Export

@@ -609,6 +609,19 @@ public class FrameAndTextTests
     }
 
     [Fact]
+    public async Task Frame_blocks_archived_scripts_unless_requested()
+    {
+        await using var host = await AppHost.StartAsync();
+        var c = SampleData.Capture(1);
+        host.RouteSite("example.com/", [c]);
+
+        var off = await host.Client.GetAsync(AppHost.FrameUrl(c));
+        var on = await host.Client.GetAsync(AppHost.FrameUrl(c) + "&scripts=true");
+
+        Assert.DoesNotContain("allow-scripts", string.Join(";", off.Headers.GetValues("Content-Security-Policy")));
+        Assert.Contains("allow-scripts", string.Join(";", on.Headers.GetValues("Content-Security-Policy")));
+    }
+    [Fact]
     public async Task Second_frame_request_comes_from_the_database()
     {
         await using var host = await AppHost.StartAsync();

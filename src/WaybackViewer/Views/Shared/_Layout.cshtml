@@ -3,13 +3,9 @@
 <html>
 	<head>
 		<meta name="request-verification-token" content="@(Antiforgery.GetAndStoreTokens(Context).RequestToken)">
-		<!-- Chrome/Edge: start loading a list page when you hover its link, so the click is instant. Links that trigger
-       work (refresh from Wayback, download everything) are excluded. Other browsers ignore this block. -->
-		<script type="speculationrules">
-			{"prefetch":[{"where":{"and":[{"href_matches":"/?*"},{"not":{"href_matches":"/*?*refresh=*"}},{"not":{"href_matches":"/*?*downloadAll=*"}}]},"eagerness":"moderate"}]}
-		</script>
+		<!-- No speculative prefetch and no cross-page view transitions: both keep extra page copies/snapshots in browser memory. -->
 		<meta charset="utf-8" />
-		<script>try { var d = document.documentElement; var lt = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches; d.setAttribute('data-theme', localStorage.getItem('wb-theme') || (lt ? 'clean-light' : 'midnight-command')); d.setAttribute('data-motion', localStorage.getItem('wb-motion') || 'rich'); d.setAttribute('data-layout', localStorage.getItem('wb-layout') || 'classic'); } catch (e) { }</script>
+		<script>try { var d = document.documentElement; var lt = window.matchMedia && matchMedia('(prefers-color-scheme: light)').matches; d.setAttribute('data-theme', localStorage.getItem('wb-theme') || (lt ? 'clean-light' : 'midnight-command')); d.setAttribute('data-motion', localStorage.getItem('wb-motion') || 'subtle'); d.setAttribute('data-layout', localStorage.getItem('wb-layout') || 'classic'); } catch (e) { }</script>
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
 		<title>@ViewData["Title"]</title>
 		<style>
@@ -42,7 +38,7 @@
 			box-shadow: 0 12px 40px rgba(0,0,0,.6); }
 			.ssframe[hidden] { display: none; }
 			.card { border-radius: var(--radius); box-shadow: var(--shadow); transition: border-color .15s, transform .15s; }
-			.card:hover { border-color: #5b8bd0; transform: translateX(2px); }
+			.card:hover { border-color: #5b8bd0; }
 			.ssbar { background: #151922; border-bottom: 1px solid #2a2f3a; }
 			button, .btn { border-radius: var(--radius-sm); }
 			.capture-row { content-visibility: auto; contain-intrinsic-size: auto 58px; }
@@ -84,8 +80,7 @@
 			.wf-row em { color: var(--text); font-style: normal; font-family: var(--font-mono); font-size: 11px; }
 			.pager { max-width: 1100px; display: flex; gap: 10px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
 			.pager span { color: #bbb; font-size: 13px; }
-			/* ---- instant feel: crossfade between pages, instant click feedback ---- */
-			@@view-transition { navigation: auto; }
+			/* ---- instant click feedback (no cross-page view transitions: they keep page snapshots in memory) ---- */
 			body.nav-pending::before { content: ""; position: fixed; top: 0; left: 0; height: 2px; width: 100%; background: var(--accent); z-index: 999;
 			transform-origin: left; animation: navbar 1.4s cubic-bezier(.1,.7,.3,1) forwards; }
 			@@keyframes navbar { from { transform: scaleX(0); } to { transform: scaleX(.92); } }
@@ -104,7 +99,7 @@
 			:root { --bg: #111418; --panel: #1c2127; --panel2: #252a31; --line: #383e47; --text: #d3d8de; --muted: #8f99a8;
 			--accent: #4c90f0; --accent-d: #2d72d2; --ok: #32a467; --warn: #ec9a3c;
 			/* design tokens: shape, spacing, depth, type and density (independent of the colour looks) */
-			--radius: 8px; --radius-sm: 6px; --gap: 10px; --shadow: 0 1px 2px rgba(0,0,0,.25); --font-mono: ui-monospace, Consolas, monospace; --row-pad: 6px; }
+			--radius: 8px; --radius-sm: 6px; --gap: 10px; --shadow: none; --font-mono: ui-monospace, Consolas, monospace; --row-pad: 6px; }
 			:root[data-theme='midnight-command'] { --bg:#111418; --panel:#1c2127; --panel2:#252a31; --line:#383e47; --text:#d3d8de; --muted:#8f99a8; --accent:#4c90f0; --accent-d:#2d72d2; --ok:#32a467; --warn:#ec9a3c; }
 			:root[data-theme='clean-light'] { --bg:#f5f7fa; --panel:#ffffff; --panel2:#eef1f5; --line:#c9d1da; --text:#1c2430; --muted:#4f5b6b; --accent:#0b5fc5; --accent-d:#084a9b; --ok:#1a7a46; --warn:#9a5b00; color-scheme: light; }
 			:root[data-motion='none'] *, :root[data-motion='none'] *::before, :root[data-motion='none'] *::after { animation: none !important; transition: none !important; }
@@ -372,8 +367,8 @@ td.cell-clip { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 			});
 			}
 
-			function t() { if (c) c.textContent = new Date().toLocaleTimeString(); }
-			t(); setInterval(function () { if (!document.hidden) t(); }, 1000);
+			function t() { if (c) c.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }
+			t(); setInterval(function () { if (!document.hidden) t(); }, 30000);
 
 			function cycle(select, step) {
 			if (!select || !select.options.length) return;
@@ -422,6 +417,6 @@ document.addEventListener('visibilitychange', function () { if (document.hidden)
 window.addEventListener('pagehide', closeLive);
 if (!document.hidden) openLive();
 })();
-</script>	<script>(function(){var s=document.getElementById('motionSelect');if(!s)return;s.value=document.documentElement.getAttribute('data-motion')||'rich';s.addEventListener('change',function(){document.documentElement.setAttribute('data-motion',s.value);try{localStorage.setItem('wb-motion',s.value);}catch(e){}});})();</script>
+</script>	<script>(function(){var s=document.getElementById('motionSelect');if(!s)return;s.value=document.documentElement.getAttribute('data-motion')||'subtle';s.addEventListener('change',function(){document.documentElement.setAttribute('data-motion',s.value);try{localStorage.setItem('wb-motion',s.value);}catch(e){}});})();</script>
 	</body>
 </html>
